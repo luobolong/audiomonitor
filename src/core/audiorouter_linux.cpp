@@ -2,6 +2,7 @@
 
 #include "realtime_audio.h"
 
+#include <QCoreApplication>
 #include <QHash>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -84,6 +85,11 @@ QString errorText(int result)
     return message ? QString::fromUtf8(message) : QString::number(result);
 }
 
+QString linuxTr(const char* source)
+{
+    return QCoreApplication::translate("AudioRouterLinux", source);
+}
+
 QString defaultSinkNameFromMetadata(const char* type, const char* value)
 {
     if (!value)
@@ -127,21 +133,24 @@ public:
 
         m_loop = pw_thread_loop_new("audiomonitor-pipewire", nullptr);
         if (!m_loop) {
-            *error = QStringLiteral("Unable to create the PipeWire thread loop");
+            *error = linuxTr(QT_TRANSLATE_NOOP(
+                "AudioRouterLinux", "Unable to create the PipeWire thread loop"));
             shutdownLocked();
             return false;
         }
 
         m_context = pw_context_new(pw_thread_loop_get_loop(m_loop), nullptr, 0);
         if (!m_context) {
-            *error = QStringLiteral("Unable to create the PipeWire context");
+            *error = linuxTr(QT_TRANSLATE_NOOP(
+                "AudioRouterLinux", "Unable to create the PipeWire context"));
             shutdownLocked();
             return false;
         }
 
         const int startResult = pw_thread_loop_start(m_loop);
         if (startResult < 0) {
-            *error = QStringLiteral("Unable to start the PipeWire thread loop: %1")
+            *error = linuxTr(QT_TRANSLATE_NOOP(
+                         "AudioRouterLinux", "Unable to start the PipeWire thread loop: %1"))
                          .arg(errorText(startResult));
             shutdownLocked();
             return false;
@@ -160,7 +169,8 @@ public:
         if (!m_core) {
             m_initializing = false;
             pw_thread_loop_unlock(m_loop);
-            *error = QStringLiteral("Unable to connect to the PipeWire server");
+            *error = linuxTr(QT_TRANSLATE_NOOP(
+                "AudioRouterLinux", "Unable to connect to the PipeWire server"));
             shutdownLocked();
             return false;
         }
@@ -173,7 +183,8 @@ public:
         if (!m_registry) {
             m_initializing = false;
             pw_thread_loop_unlock(m_loop);
-            *error = QStringLiteral("Unable to obtain the PipeWire registry");
+            *error = linuxTr(QT_TRANSLATE_NOOP(
+                "AudioRouterLinux", "Unable to obtain the PipeWire registry"));
             shutdownLocked();
             return false;
         }
@@ -195,7 +206,8 @@ public:
         std::lock_guard<std::mutex> controlGuard(m_controlMutex);
         if (!m_loop || !m_coreConnected.load(std::memory_order_acquire) || !m_registryReady) {
             if (error)
-                *error = QStringLiteral("PipeWire is not connected");
+                *error = linuxTr(QT_TRANSLATE_NOOP(
+                    "AudioRouterLinux", "PipeWire is not connected"));
             return {};
         }
 
@@ -229,11 +241,13 @@ public:
         std::lock_guard<std::mutex> controlGuard(m_controlMutex);
         if (!m_loop || !m_core || !m_coreConnected.load(std::memory_order_acquire)
             || !m_registryReady) {
-            *error = QStringLiteral("PipeWire is not connected");
+            *error = linuxTr(QT_TRANSLATE_NOOP(
+                "AudioRouterLinux", "PipeWire is not connected"));
             return false;
         }
         if (!std::isfinite(volume)) {
-            *error = QStringLiteral("The monitoring volume is not a finite number");
+            *error = linuxTr(QT_TRANSLATE_NOOP(
+                "AudioRouterLinux", "The monitoring volume is not a finite number"));
             return false;
         }
 
@@ -249,15 +263,24 @@ public:
         if (!source || !target) {
             m_starting = false;
             pw_thread_loop_unlock(m_loop);
-            *error = QStringLiteral("The selected PipeWire source or target sink is no longer available");
+            *error = linuxTr(QT_TRANSLATE_NOOP(
+                "AudioRouterLinux",
+                "The selected PipeWire source or target sink is no longer available"));
             return false;
         }
         if (source->id == target->id) {
             m_starting = false;
             pw_thread_loop_unlock(m_loop);
-            *error = QStringLiteral("The source and target sinks must be different to prevent feedback");
+            *error = linuxTr(QT_TRANSLATE_NOOP(
+                "AudioRouterLinux",
+                "The source and target sinks must be different to prevent feedback"));
             return false;
         }
+        // Keep the canonical IDs published by outputDevices().  The caller may
+        // still pass a legacy raw name or serial while recovering a session,
+        // but reconnect state must use the stable identifier that survives a
+        // PipeWire object-id change.
+        const SessionDeviceIds canonicalIds{ stableId(*source), stableId(*target) };
         const uint32_t sourceNodeId = source->id;
         const uint32_t targetNodeId = target->id;
 
@@ -272,13 +295,17 @@ public:
         if (sourcePorts[0] == SPA_ID_INVALID || sourcePorts[1] == SPA_ID_INVALID) {
             m_starting = false;
             pw_thread_loop_unlock(m_loop);
-            *error = QStringLiteral("The selected source sink does not expose FL/FR monitor ports");
+            *error = linuxTr(QT_TRANSLATE_NOOP(
+                "AudioRouterLinux",
+                "The selected source sink does not expose FL/FR monitor ports"));
             return false;
         }
         if (targetPorts[0] == SPA_ID_INVALID || targetPorts[1] == SPA_ID_INVALID) {
             m_starting = false;
             pw_thread_loop_unlock(m_loop);
-            *error = QStringLiteral("The selected target sink does not expose FL/FR input ports");
+            *error = linuxTr(QT_TRANSLATE_NOOP(
+                "AudioRouterLinux",
+                "The selected target sink does not expose FL/FR input ports"));
             return false;
         }
 
@@ -299,7 +326,9 @@ public:
         if (ok) {
             m_filterNodeId = pw_filter_get_node_id(m_filter);
             if (m_filterNodeId == SPA_ID_INVALID) {
-                *error = QStringLiteral("PipeWire did not publish the monitoring filter node");
+                *error = linuxTr(QT_TRANSLATE_NOOP(
+                    "AudioRouterLinux",
+                    "PipeWire did not publish the monitoring filter node"));
                 ok = false;
             }
         }
@@ -314,7 +343,9 @@ public:
             };
             if (filterInputs[0] == SPA_ID_INVALID || filterInputs[1] == SPA_ID_INVALID
                 || filterOutputs[0] == SPA_ID_INVALID || filterOutputs[1] == SPA_ID_INVALID) {
-                *error = QStringLiteral("PipeWire did not publish all FL/FR monitoring filter ports");
+                *error = linuxTr(QT_TRANSLATE_NOOP(
+                    "AudioRouterLinux",
+                    "PipeWire did not publish all FL/FR monitoring filter ports"));
                 ok = false;
             }
         }
@@ -355,6 +386,7 @@ public:
 
         m_starting = false;
         m_running.store(true, std::memory_order_release);
+        m_sessionDeviceIds = canonicalIds;
         pw_thread_loop_unlock(m_loop);
         return true;
     }
@@ -378,6 +410,11 @@ public:
     bool running() const noexcept
     {
         return m_running.load(std::memory_order_acquire);
+    }
+
+    SessionDeviceIds sessionDeviceIds() const
+    {
+        return m_sessionDeviceIds;
     }
 
     void setVolume(float volume) noexcept
@@ -508,7 +545,9 @@ private:
     {
         auto* self = static_cast<PipeWireSession*>(data);
         const QString detail = message ? QString::fromUtf8(message) : errorText(result);
-        const QString error = QStringLiteral("PipeWire core error: %1").arg(detail);
+        const QString error = linuxTr(QT_TRANSLATE_NOOP(
+                                  "AudioRouterLinux", "PipeWire core error: %1"))
+                                  .arg(detail);
 
         const bool disconnected = id == PW_ID_CORE && result == -EPIPE;
         if (disconnected)
@@ -638,7 +677,9 @@ private:
         if (selectedEndpointRemoved) {
             self->scheduleFailureFromLoop(
                 StopReason::DeviceFailure,
-                QStringLiteral("The selected PipeWire source or target sink was removed; monitoring stopped"));
+                linuxTr(QT_TRANSLATE_NOOP(
+                    "AudioRouterLinux",
+                    "The selected PipeWire source or target sink was removed; monitoring stopped")));
         }
         if (deviceChanged && self->m_registryReady)
             self->postDevicesChanged();
@@ -671,9 +712,12 @@ private:
         auto* self = static_cast<PipeWireSession*>(data);
         self->m_filterState = state;
         if (state == PW_FILTER_STATE_ERROR) {
-            const QString message = QStringLiteral("PipeWire filter error: %1")
-                                        .arg(error ? QString::fromUtf8(error)
-                                                   : QStringLiteral("unknown error"));
+            const QString detail = error
+                ? QString::fromUtf8(error)
+                : linuxTr(QT_TRANSLATE_NOOP("AudioRouterLinux", "unknown error"));
+            const QString message = linuxTr(QT_TRANSLATE_NOOP(
+                                        "AudioRouterLinux", "PipeWire filter error: %1"))
+                                        .arg(detail);
             if (self->m_starting) {
                 if (self->m_asyncError.isEmpty())
                     self->m_asyncError = message;
@@ -684,7 +728,9 @@ private:
                    && self->m_running.load(std::memory_order_relaxed)) {
             self->scheduleFailureFromLoop(
                 StopReason::DeviceFailure,
-                QStringLiteral("The PipeWire monitoring filter disconnected; monitoring stopped"));
+                linuxTr(QT_TRANSLATE_NOOP(
+                    "AudioRouterLinux",
+                    "The PipeWire monitoring filter disconnected; monitoring stopped")));
         }
         pw_thread_loop_signal(self->m_loop, false);
     }
@@ -730,14 +776,18 @@ private:
         }
         link->proxy = nullptr;
         link->owner->handleLinkFailureFromLoop(
-            link, QStringLiteral("A PipeWire monitoring link was destroyed"));
+            link,
+            linuxTr(QT_TRANSLATE_NOOP(
+                "AudioRouterLinux", "A PipeWire monitoring link was destroyed")));
     }
 
     static void onLinkProxyRemoved(void* data)
     {
         auto* link = static_cast<LinkHandle*>(data);
         link->owner->handleLinkFailureFromLoop(
-            link, QStringLiteral("A PipeWire monitoring link was removed"));
+            link,
+            linuxTr(QT_TRANSLATE_NOOP(
+                "AudioRouterLinux", "A PipeWire monitoring link was removed")));
         if (link->proxy)
             pw_proxy_destroy(link->proxy);
     }
@@ -747,7 +797,10 @@ private:
         auto* link = static_cast<LinkHandle*>(data);
         const QString detail = message ? QString::fromUtf8(message) : errorText(result);
         link->owner->handleLinkFailureFromLoop(
-            link, QStringLiteral("PipeWire could not create a monitoring link: %1").arg(detail));
+            link,
+            linuxTr(QT_TRANSLATE_NOOP(
+                "AudioRouterLinux", "PipeWire could not create a monitoring link: %1"))
+                .arg(detail));
     }
 
     static void onLinkInfo(void* data, const pw_link_info* info)
@@ -759,7 +812,8 @@ private:
         if (info->state == PW_LINK_STATE_ERROR || info->state == PW_LINK_STATE_UNLINKED) {
             link->owner->handleLinkFailureFromLoop(
                 link,
-                QStringLiteral("PipeWire monitoring link error: %1")
+                linuxTr(QT_TRANSLATE_NOOP(
+                    "AudioRouterLinux", "PipeWire monitoring link error: %1"))
                     .arg(info->error ? QString::fromUtf8(info->error)
                                      : QString::fromUtf8(pw_link_state_as_string(info->state))));
         }
@@ -855,14 +909,16 @@ private:
     bool synchronizeLocked(QString* error)
     {
         if (!m_core || !m_coreConnected.load(std::memory_order_acquire)) {
-            *error = QStringLiteral("The PipeWire core disconnected");
+            *error = linuxTr(QT_TRANSLATE_NOOP(
+                "AudioRouterLinux", "The PipeWire core disconnected"));
             return false;
         }
 
         m_asyncError.clear();
         const int sequence = pw_core_sync(m_core, PW_ID_CORE, m_syncSequence);
         if (sequence < 0) {
-            *error = QStringLiteral("Unable to synchronize with PipeWire: %1")
+            *error = linuxTr(QT_TRANSLATE_NOOP(
+                         "AudioRouterLinux", "Unable to synchronize with PipeWire: %1"))
                          .arg(errorText(sequence));
             return false;
         }
@@ -871,7 +927,9 @@ private:
         timespec deadline{};
         const int timeResult = pw_thread_loop_get_time(m_loop, &deadline, kOperationTimeoutNs);
         if (timeResult < 0) {
-            *error = QStringLiteral("Unable to create a PipeWire synchronization deadline: %1")
+            *error = linuxTr(QT_TRANSLATE_NOOP(
+                         "AudioRouterLinux",
+                         "Unable to create a PipeWire synchronization deadline: %1"))
                          .arg(errorText(timeResult));
             return false;
         }
@@ -879,11 +937,13 @@ private:
         while (m_lastDoneSequence != sequence && m_asyncError.isEmpty()) {
             const int waitResult = pw_thread_loop_timed_wait_full(m_loop, &deadline);
             if (waitResult == -ETIMEDOUT) {
-                *error = QStringLiteral("Timed out while synchronizing with PipeWire");
+                *error = linuxTr(QT_TRANSLATE_NOOP(
+                    "AudioRouterLinux", "Timed out while synchronizing with PipeWire"));
                 return false;
             }
             if (waitResult < 0 && waitResult != -EINTR) {
-                *error = QStringLiteral("PipeWire synchronization failed: %1")
+                *error = linuxTr(QT_TRANSLATE_NOOP(
+                             "AudioRouterLinux", "PipeWire synchronization failed: %1"))
                              .arg(errorText(waitResult));
                 return false;
             }
@@ -909,13 +969,15 @@ private:
             PW_KEY_NODE_RATE, kRequestedRate,
             nullptr);
         if (!properties) {
-            *error = QStringLiteral("Unable to allocate PipeWire filter properties");
+            *error = linuxTr(QT_TRANSLATE_NOOP(
+                "AudioRouterLinux", "Unable to allocate PipeWire filter properties"));
             return false;
         }
 
         m_filter = pw_filter_new(m_core, "audiomonitor-filter", properties);
         if (!m_filter) {
-            *error = QStringLiteral("Unable to create the PipeWire monitoring filter");
+            *error = linuxTr(QT_TRANSLATE_NOOP(
+                "AudioRouterLinux", "Unable to create the PipeWire monitoring filter"));
             return false;
         }
         pw_filter_add_listener(m_filter, &m_filterListener, &filterEvents(), this);
@@ -937,7 +999,8 @@ private:
                 nullptr,
                 0));
             if (!input) {
-                *error = QStringLiteral("Unable to create PipeWire filter input %1")
+                *error = linuxTr(QT_TRANSLATE_NOOP(
+                             "AudioRouterLinux", "Unable to create PipeWire filter input %1"))
                              .arg(QString::fromLatin1(kChannelNames[channel]));
                 return false;
             }
@@ -958,7 +1021,8 @@ private:
                 nullptr,
                 0));
             if (!output) {
-                *error = QStringLiteral("Unable to create PipeWire filter output %1")
+                *error = linuxTr(QT_TRANSLATE_NOOP(
+                             "AudioRouterLinux", "Unable to create PipeWire filter output %1"))
                              .arg(QString::fromLatin1(kChannelNames[channel]));
                 return false;
             }
@@ -979,7 +1043,9 @@ private:
         const int connectResult = pw_filter_connect(
             m_filter, PW_FILTER_FLAG_RT_PROCESS, parameters, SPA_N_ELEMENTS(parameters));
         if (connectResult < 0) {
-            *error = QStringLiteral("Unable to connect the PipeWire monitoring filter: %1")
+            *error = linuxTr(QT_TRANSLATE_NOOP(
+                         "AudioRouterLinux",
+                         "Unable to connect the PipeWire monitoring filter: %1"))
                          .arg(errorText(connectResult));
             return false;
         }
@@ -991,7 +1057,9 @@ private:
         timespec deadline{};
         const int timeResult = pw_thread_loop_get_time(m_loop, &deadline, kOperationTimeoutNs);
         if (timeResult < 0) {
-            *error = QStringLiteral("Unable to create a PipeWire filter deadline: %1")
+            *error = linuxTr(QT_TRANSLATE_NOOP(
+                         "AudioRouterLinux",
+                         "Unable to create a PipeWire filter deadline: %1"))
                          .arg(errorText(timeResult));
             return false;
         }
@@ -1001,11 +1069,14 @@ private:
                && m_filterState != PW_FILTER_STATE_ERROR && m_asyncError.isEmpty()) {
             const int waitResult = pw_thread_loop_timed_wait_full(m_loop, &deadline);
             if (waitResult == -ETIMEDOUT) {
-                *error = QStringLiteral("Timed out while activating the PipeWire monitoring filter");
+                *error = linuxTr(QT_TRANSLATE_NOOP(
+                    "AudioRouterLinux",
+                    "Timed out while activating the PipeWire monitoring filter"));
                 return false;
             }
             if (waitResult < 0 && waitResult != -EINTR) {
-                *error = QStringLiteral("Waiting for the PipeWire filter failed: %1")
+                *error = linuxTr(QT_TRANSLATE_NOOP(
+                             "AudioRouterLinux", "Waiting for the PipeWire filter failed: %1"))
                              .arg(errorText(waitResult));
                 return false;
             }
@@ -1015,7 +1086,9 @@ private:
             return false;
         }
         if (m_filterState == PW_FILTER_STATE_ERROR) {
-            *error = QStringLiteral("The PipeWire monitoring filter entered an error state");
+            *error = linuxTr(QT_TRANSLATE_NOOP(
+                "AudioRouterLinux",
+                "The PipeWire monitoring filter entered an error state"));
             return false;
         }
         return true;
@@ -1034,7 +1107,8 @@ private:
 
         pw_properties* properties = pw_properties_new(nullptr, nullptr);
         if (!properties) {
-            *error = QStringLiteral("Unable to allocate PipeWire link properties");
+            *error = linuxTr(QT_TRANSLATE_NOOP(
+                "AudioRouterLinux", "Unable to allocate PipeWire link properties"));
             return false;
         }
         const int propertyResults[] = {
@@ -1050,7 +1124,9 @@ private:
             propertyFailure = propertyFailure || result < 0;
         if (propertyFailure) {
             pw_properties_free(properties);
-            *error = QStringLiteral("Unable to populate PipeWire monitoring link properties");
+            *error = linuxTr(QT_TRANSLATE_NOOP(
+                "AudioRouterLinux",
+                "Unable to populate PipeWire monitoring link properties"));
             return false;
         }
 
@@ -1063,7 +1139,8 @@ private:
             0));
         pw_properties_free(properties);
         if (!link.proxy) {
-            *error = QStringLiteral("Unable to create a PipeWire monitoring link");
+            *error = linuxTr(QT_TRANSLATE_NOOP(
+                "AudioRouterLinux", "Unable to create a PipeWire monitoring link"));
             return false;
         }
 
@@ -1078,7 +1155,8 @@ private:
         timespec deadline{};
         const int timeResult = pw_thread_loop_get_time(m_loop, &deadline, kOperationTimeoutNs);
         if (timeResult < 0) {
-            *error = QStringLiteral("Unable to create a PipeWire link deadline: %1")
+            *error = linuxTr(QT_TRANSLATE_NOOP(
+                         "AudioRouterLinux", "Unable to create a PipeWire link deadline: %1"))
                          .arg(errorText(timeResult));
             return false;
         }
@@ -1086,11 +1164,15 @@ private:
         while (!linksDefinitiveLocked() && m_asyncError.isEmpty()) {
             const int waitResult = pw_thread_loop_timed_wait_full(m_loop, &deadline);
             if (waitResult == -ETIMEDOUT) {
-                *error = QStringLiteral("Timed out while negotiating PipeWire monitoring links");
+                *error = linuxTr(QT_TRANSLATE_NOOP(
+                    "AudioRouterLinux",
+                    "Timed out while negotiating PipeWire monitoring links"));
                 return false;
             }
             if (waitResult < 0 && waitResult != -EINTR) {
-                *error = QStringLiteral("Waiting for PipeWire monitoring links failed: %1")
+                *error = linuxTr(QT_TRANSLATE_NOOP(
+                             "AudioRouterLinux",
+                             "Waiting for PipeWire monitoring links failed: %1"))
                              .arg(errorText(waitResult));
                 return false;
             }
@@ -1102,7 +1184,9 @@ private:
         for (const LinkHandle& link : m_links) {
             if (link.state != PW_LINK_STATE_PAUSED && link.state != PW_LINK_STATE_ACTIVE) {
                 *error = link.error.isEmpty()
-                    ? QStringLiteral("A PipeWire monitoring link did not become active")
+                    ? linuxTr(QT_TRANSLATE_NOOP(
+                          "AudioRouterLinux",
+                          "A PipeWire monitoring link did not become active"))
                     : link.error;
                 return false;
             }
@@ -1331,6 +1415,7 @@ private:
     QHash<uint32_t, PortRecord> m_ports;
     QString m_defaultSinkName;
     QString m_asyncError;
+    SessionDeviceIds m_sessionDeviceIds;
 
     int m_syncSequence = 0;
     int m_lastDoneSequence = -1;
@@ -1371,11 +1456,29 @@ AudioRouterLinux::AudioRouterLinux(QObject* parent)
 
 AudioRouterLinux::~AudioRouterLinux() = default;
 
+void AudioRouterLinux::reinitializeSession()
+{
+    // This runs from a queued GUI callback, after the failure-delivery method
+    // on the previous session has returned. Destroying the session earlier
+    // would invalidate the object whose callback is still unwinding.
+    m_reinitializationQueued = false;
+    m_session.reset();
+    m_initializationError.clear();
+    m_session = std::make_unique<PipeWireSession>(this);
+    if (!m_session->initialize(&m_initializationError) && !m_initializationError.isEmpty())
+        emit errorOccurred(m_initializationError);
+}
+
 QVector<DeviceInfo> AudioRouterLinux::outputDevices()
 {
     if (!m_initializationError.isEmpty()) {
-        emit errorOccurred(m_initializationError);
-        return {};
+        // A service may have been unavailable only briefly. Retry creating the
+        // session on the next enumeration so automatic recovery can proceed.
+        reinitializeSession();
+        if (!m_initializationError.isEmpty()) {
+            emit errorOccurred(m_initializationError);
+            return {};
+        }
     }
 
     QString error;
@@ -1387,9 +1490,13 @@ QVector<DeviceInfo> AudioRouterLinux::outputDevices()
 
 bool AudioRouterLinux::start(const QString& sourceId, const QString& targetId, float volume)
 {
+    // A new attempt supersedes any previous recovery snapshot.  The snapshot
+    // is republished only after the PipeWire graph is fully running.
+    m_lastSessionDeviceIds = {};
     if (m_captureDumpRequested || m_playbackDumpRequested || m_callbackDumpRequested) {
-        emit errorOccurred(QStringLiteral(
-            "Debug audio dumps are disabled on the native PipeWire backend because file I/O is not realtime-safe"));
+        emit errorOccurred(linuxTr(QT_TRANSLATE_NOOP(
+            "AudioRouterLinux",
+            "Debug audio dumps are disabled on the native PipeWire backend because file I/O is not realtime-safe")));
         return false;
     }
     if (!m_initializationError.isEmpty()) {
@@ -1402,19 +1509,27 @@ bool AudioRouterLinux::start(const QString& sourceId, const QString& targetId, f
         emit errorOccurred(error);
         return false;
     }
+    m_lastSessionDeviceIds = m_session->sessionDeviceIds();
     emit started();
     return true;
 }
 
 void AudioRouterLinux::stop()
 {
-    if (m_session && m_session->stop())
+    const bool sessionStopped = m_session && m_session->stop();
+    m_lastSessionDeviceIds = {};
+    if (sessionStopped)
         emit stopped(StopReason::UserRequested);
 }
 
 bool AudioRouterLinux::isRunning() const
 {
     return m_session && m_session->running();
+}
+
+SessionDeviceIds AudioRouterLinux::lastSessionDeviceIds() const
+{
+    return m_lastSessionDeviceIds;
 }
 
 void AudioRouterLinux::setVolume(float volume)
@@ -1427,8 +1542,9 @@ void AudioRouterLinux::setCaptureDumpFile(const QString& path)
 {
     m_captureDumpRequested = !path.isEmpty();
     if (m_captureDumpRequested && isRunning()) {
-        emit errorOccurred(QStringLiteral(
-            "Capture dumps are disabled on the native PipeWire backend because file I/O is not realtime-safe"));
+        emit errorOccurred(linuxTr(QT_TRANSLATE_NOOP(
+            "AudioRouterLinux",
+            "Capture dumps are disabled on the native PipeWire backend because file I/O is not realtime-safe")));
     }
 }
 
@@ -1436,8 +1552,9 @@ void AudioRouterLinux::setPlaybackDumpFile(const QString& path)
 {
     m_playbackDumpRequested = !path.isEmpty();
     if (m_playbackDumpRequested && isRunning()) {
-        emit errorOccurred(QStringLiteral(
-            "Playback dumps are disabled on the native PipeWire backend because file I/O is not realtime-safe"));
+        emit errorOccurred(linuxTr(QT_TRANSLATE_NOOP(
+            "AudioRouterLinux",
+            "Playback dumps are disabled on the native PipeWire backend because file I/O is not realtime-safe")));
     }
 }
 
@@ -1445,8 +1562,9 @@ void AudioRouterLinux::setCallbackDumpFile(const QString& path)
 {
     m_callbackDumpRequested = !path.isEmpty();
     if (m_callbackDumpRequested && isRunning()) {
-        emit errorOccurred(QStringLiteral(
-            "Callback dumps are disabled on the native PipeWire backend because file I/O is not realtime-safe"));
+        emit errorOccurred(linuxTr(QT_TRANSLATE_NOOP(
+            "AudioRouterLinux",
+            "Callback dumps are disabled on the native PipeWire backend because file I/O is not realtime-safe")));
     }
 }
 
@@ -1457,6 +1575,17 @@ void AudioRouterLinux::notifyError(const QString& message)
 
 void AudioRouterLinux::notifyStopped(StopReason reason)
 {
+    if (reason == StopReason::ServiceFailure && !m_reinitializationQueued) {
+        m_reinitializationQueued = true;
+        QPointer<AudioRouterLinux> owner(this);
+        QMetaObject::invokeMethod(
+            this,
+            [owner]() {
+                if (owner)
+                    owner->reinitializeSession();
+            },
+            Qt::QueuedConnection);
+    }
     emit stopped(reason);
 }
 

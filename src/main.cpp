@@ -14,9 +14,10 @@
 
 namespace {
 
-// --list-devices：打印可用输出设备后退出（便于脚本与调试）。
+// --list-devices: print available output devices and exit for scripts/debugging.
 int listDevicesMode(QCoreApplication& app)
 {
+    Q_UNUSED(app);
     const std::unique_ptr<AudioRouter> router(AudioRouter::create());
     QTextStream out(stdout);
     const QVector<DeviceInfo> devices = router->outputDevices();
@@ -26,23 +27,23 @@ int listDevicesMode(QCoreApplication& app)
     return devices.isEmpty() ? 1 : 0;
 }
 
-// --forward <sourceId> <targetId> [volume]：无界面直接转发（调试/测试用），
-// 持续运行直到被终止（Ctrl+C / kill）。
-// 可选 --dump-capture <path>：把捕获到的原始音频导出到文件。
+// --forward <sourceId> <targetId> [volume]: forward without a GUI for
+// debugging/testing until terminated (Ctrl+C/kill).
+// Optional dump flags export raw audio or callback information.
 int forwardMode(QCoreApplication& app, const QStringList& args)
 {
     QTextStream out(stdout);
     const std::unique_ptr<AudioRouter> router(AudioRouter::create());
     QObject::connect(router.get(), &AudioRouter::started, [&]() {
-        out << "转发已启动" << '\n';
+        out << "Forwarding started" << '\n';
         out.flush();
     });
     QObject::connect(router.get(), &AudioRouter::stopped, [&]() {
-        out << "转发已停止" << '\n';
+        out << "Forwarding stopped" << '\n';
         out.flush();
     });
     QObject::connect(router.get(), &AudioRouter::errorOccurred, [&](const QString& msg) {
-        out << "错误: " << msg << '\n';
+        out << "Error: " << msg << '\n';
         out.flush();
         QCoreApplication::exit(1);
     });
@@ -72,15 +73,15 @@ int main(int argc, char* argv[])
     QCoreApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
 #endif
 #ifdef Q_OS_WIN
-    // GUI 线程为 STA：WASAPI 设备枚举/通知回调要求 COM 初始化
+    // The GUI thread is an STA because WASAPI enumeration/notifications require COM.
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 #endif
 
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("AudioMonitor"));
-    app.setApplicationDisplayName(QStringLiteral("音频监听转发"));
+    app.setApplicationDisplayName(QStringLiteral("AudioMonitor"));
     app.setOrganizationName(QStringLiteral("AudioMonitor"));
-    app.setQuitOnLastWindowClosed(false); // 关闭窗口后继续在托盘运行
+    app.setQuitOnLastWindowClosed(false); // Keep running in the tray after the window closes.
     app.setWindowIcon(makeAppIcon());
 
     const QStringList args = app.arguments();
@@ -89,7 +90,7 @@ int main(int argc, char* argv[])
     if (args.contains(QStringLiteral("--forward"))) {
         const int idx = args.indexOf(QStringLiteral("--forward"));
         if (idx + 2 >= args.size()) {
-            QTextStream(stderr) << "用法: audiomonitor --forward <sourceId> <targetId> [volume]"
+            QTextStream(stderr) << "Usage: audiomonitor --forward <sourceId> <targetId> [volume]"
                                 << '\n';
             return 2;
         }
@@ -99,7 +100,7 @@ int main(int argc, char* argv[])
     MainWindow w;
     w.show();
 
-    // --smoke-test：N 毫秒后自动退出（CI/冒烟测试用）
+    // --smoke-test: exit after N milliseconds for CI/smoke tests.
     const int smokeIdx = args.indexOf(QStringLiteral("--smoke-test"));
     if (smokeIdx >= 0 && smokeIdx + 1 < args.size()) {
         bool ok = false;

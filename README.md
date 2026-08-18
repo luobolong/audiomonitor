@@ -13,7 +13,7 @@ AudioMonitor 把一个输出设备上正在播放的声音转发到另一个输�
 
 ### Linux：原生 PipeWire 过滤节点
 
-Linux 后端直接连接 `libpipewire-0.3`，不经过兼容音频 API。它通过 PipeWire registry 枚举音频 sink，优先使用 `object.serial` 作为稳定选择 ID，缺失时回退到 `node.name`，并从 metadata 跟踪默认 sink。设备变化通过 Qt queued signal 送回界面，不从实时线程访问 UI。
+Linux 后端直接连接 `libpipewire-0.3`，不经过兼容音频 API。它通过 PipeWire registry 枚举音频 sink，优先使用 `serial:<object.serial>` 作为稳定选择 ID，缺失时回退到 `name:<node.name>`，并从 metadata 跟踪默认 sink。设备变化通过 Qt queued signal 送回界面，不从实时线程访问 UI。
 
 监听会创建一个带立体声 `FL`/`FR` 输入和输出端口的 `pw_filter`，并自动建立以下图连接：
 
@@ -43,12 +43,16 @@ WASAPI 捕获端和渲染端运行在不同线程及设备时钟边界，因此 
 
 ## 构建
 
-通用依赖为 CMake ≥ 3.16、C++17 编译器和 Qt 6 Widgets。Linux 另外需要 `pkg-config` 与原生 PipeWire 0.3 开发文件。
+通用依赖为 CMake ≥ 3.16、C++17 编译器、Qt 6.2+ Widgets 和 Qt Linguist
+Tools。Linux 构建还需要
+`pkg-config` 与原生 PipeWire 0.3 开发文件；运行时需要 Qt 6、
+`libpipewire-0.3.so.0`、可用的 PipeWire 图和 session manager。Windows
+构建需要支持 WASAPI 的 Windows 10/11 和 Qt 6 MSVC。
 
 ### Debian / Ubuntu
 
 ```bash
-sudo apt install build-essential cmake ninja-build pkg-config qt6-base-dev libpipewire-0.3-dev
+sudo apt install build-essential cmake ninja-build pkg-config qt6-base-dev qt6-tools-dev qt6-l10n-tools libpipewire-0.3-dev
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure
@@ -58,7 +62,7 @@ ctest --test-dir build --output-on-failure
 ### Fedora
 
 ```bash
-sudo dnf install gcc-c++ cmake ninja-build pkgconf-pkg-config qt6-qtbase-devel pipewire-devel
+sudo dnf install gcc-c++ cmake ninja-build pkgconf-pkg-config qt6-qtbase-devel qt6-qttools-devel pipewire-devel
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure
@@ -67,7 +71,7 @@ ctest --test-dir build --output-on-failure
 ### Arch Linux
 
 ```bash
-sudo pacman -S --needed base-devel cmake ninja pkgconf qt6-base pipewire
+sudo pacman -S --needed base-devel cmake ninja pkgconf qt6-base qt6-tools pipewire
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure
@@ -100,14 +104,23 @@ cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-分发时可用 `windeployqt build\Release\audiomonitor.exe` 收集 Qt 运行库。GitHub Actions 的 Windows ZIP 将程序和所需 Qt/MSVC DLL 放在同一个 `audiomonitor-windows` 顶层目录中；请完整解压后运行。
+分发时可用 `windeployqt build\Release\audiomonitor.exe` 收集 Qt 运行库。
+GitHub Actions 的 Windows 构建产物将程序和所需 Qt/MSVC DLL 放在同一个
+`audiomonitor-windows` 顶层目录中；请完整下载并解压后运行。
 
 ## 使用
 
 1. 选择监听源和另一个转发目标。相同设备会被拒绝。
 2. 点击「开始监听」；状态栏显示当前路由。
 3. 关闭窗口会在支持系统托盘的桌面环境中转入后台。
-4. 所选设备移除或后端断开时，当前 session 会停止并报告一次有用错误，随后刷新设备列表。
+4. 所选设备移除或后端断开时，当前 session 会停止并报告一次有用错误，随后刷新设备列表并按实际运行 session 的设备 ID 尝试重连。
+
+### 界面语言
+
+界面提供 English 和简体中文。首次启动时会读取操作系统语言：中文系统
+默认使用简体中文，其他语言默认使用 English。手动选择只在系统托盘图标
+的右键菜单中提供（`Language` → `English` / `简体中文`），选择会保存到
+应用设置并在下次启动继续使用；设备名称本身保持操作系统返回的原文。
 
 命令行辅助模式：
 
@@ -117,26 +130,19 @@ audiomonitor --forward <源id> <目标id> [音量]
 audiomonitor --smoke-test 3000
 ```
 
-调试 dump 参数仍可用于支持它们的后端：
+## 延迟与缓冲
 
-```bash
-audiomonitor --forward A B --dump-capture /tmp/cap.raw
-audiomonitor --forward A B --dump-playback /tmp/play.raw
-audiomonitor --forward A B --dump-callbacks /tmp/cb.txt
-```
+Linux 后端会通过受支持的 PipeWire 属性请求合理的低延迟 graph quantum，但
+请求值不是测量结果，也不会强制全局 quantum。实际延迟由 PipeWire 协商的
+graph rate/quantum、节点处理、链接状态和设备延迟共同决定。
 
-原生 PipeWire 后端明确禁用这三个 dump 功能并返回错误；它不会在实时 process 回调里打开、写入或关闭文件。Windows 后端的 dump 行为保持不变。
-
-## 延迟与状态
-
-Linux 后端会通过受支持的 PipeWire 属性请求合理的低延迟 graph quantum，但请求值不是测量结果，也不会强制全局 quantum。可用时，状态信息来自运行时协商的 graph rate、quantum、process latency 以及节点/链接状态。项目不发布一个仅由请求参数推算出的固定“实际延迟”。
-
-Windows 状态分别看待 RingBuffer 当前占用量和物理容量、WASAPI 捕获缓冲容量、渲染 padding、设备/stream latency。最大容量之和不等同于实际音频年龄。
+Windows 的有界 RingBuffer 在空间不足时丢弃无法容纳的新帧并发布 discontinuity；消费者随后清除 discontinuity 之前排队的旧音频，避免长期积压。
+队列容量、WASAPI 捕获缓冲、渲染 padding 和设备/stream latency 都会影响
+总延迟；这些容量之和并不等于音频的实际年龄，当前界面也不显示测量延迟。
 
 ## 已知限制
 
 - Linux 需要可用的 PipeWire audio graph 和 session manager；没有 monitor 输出的 sink 不能作为监听源。
-- 原生 PipeWire 后端不支持调试音频 dump，原因见上文。
 - Linux 系统托盘依赖 StatusNotifier/AppIndicator；部分 Wayland 桌面不提供托盘支持。
 - Windows 监听源被独占模式占用时，WASAPI loopback 可能无法启动。
 - 设备必须已连接并处于激活状态。不同硬件、驱动和 PipeWire/WASAPI 配置下的延迟需要在运行环境中测量。
@@ -157,7 +163,11 @@ src/
 
 ## 分发与 CI
 
-发布工作流生成 `.deb`、`.rpm`、`.tar.gz`、`.AppImage`、Arch `.pkg.tar.zst` 和 PKGBUILD。通用包及 AppImage 仍依赖主机提供正在运行的 PipeWire 服务；包格式不会替代系统音频图。发行版依赖和兼容性说明见 [.github/PACKAGING.md](.github/PACKAGING.md)。
+标签（格式为 `vX.Y.Z`）发布工作流生成 `.deb`、`.rpm`、`.tar.gz`、`.AppImage`、Arch
+`.pkg.tar.zst` 和对应的 `PKGBUILD`，并附带 `SHA256SUMS`。Nix/NixOS 使用
+仓库中的 `flake.nix` 或 `default.nix` 从源代码构建，不作为发布二进制附件。
+通用包及 AppImage 仍依赖主机提供正在运行的 PipeWire 服务；包格式不会替代
+系统音频图。发行版依赖和兼容性说明见 [.github/PACKAGING.md](.github/PACKAGING.md)。
 
 - `.github/workflows/build.yml` 在 Ubuntu 24.04（Qt 6 + `libpipewire-0.3-dev`）和 Windows 上构建并运行测试。
 - `.github/workflows/release.yml` 在标签构建时运行 Linux 测试并生成发布包。

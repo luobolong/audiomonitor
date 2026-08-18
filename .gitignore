@@ -1,5 +1,5 @@
-# ===== 构建产物 =====
-# CMake 构建目录（build.sh 默认输出到 build/）
+# ===== Build output =====
+# CMake build directories (build.sh defaults to build/).
 build/
 build-*/
 dist/
@@ -7,7 +7,7 @@ out/
 cmake-build-*/
 qt/
 
-# 若有人直接在源码根目录跑 cmake（不推荐），忽略这些生成文件
+# Ignore generated files if CMake is run in the source tree.
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
@@ -16,13 +16,13 @@ Testing/
 install_manifest.txt
 
 # ===== Nix =====
-# nix build / nix-build 的结果符号链接
+# Result symlinks from nix build / nix-build.
 result
 result-*
 
-# 注意：flake.lock 不应被忽略——它用于锁定依赖版本，建议提交到仓库
+# Keep flake.lock tracked so dependency versions remain reproducible.
 
-# ===== 编译中间文件 =====
+# ===== Compiler output =====
 *.o
 *.obj
 *.a
@@ -33,7 +33,7 @@ result-*
 *.pdb
 *.ilk
 
-# Qt 自动生成
+# Qt-generated files.
 moc_*.cpp
 qrc_*.cpp
 ui_*.h
@@ -41,7 +41,7 @@ ui_*.h
 *.pro.user.*
 .qmake.stash
 
-# ===== 编辑器 / IDE =====
+# ===== Editors / IDEs =====
 .vscode/
 .idea/
 .cache/
@@ -50,7 +50,7 @@ compile_commands.json
 *.user
 *.autosave
 
-# ===== 系统垃圾文件 =====
+# ===== OS metadata =====
 .DS_Store
 Thumbs.db
 desktop.ini

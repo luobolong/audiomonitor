@@ -7,8 +7,13 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
-find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets)
-find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
+find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets LinguistTools)
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets LinguistTools)
+
+set(AUDIOMONITOR_TRANSLATIONS
+    translations/audiomonitor_en.ts
+    translations/audiomonitor_zh_CN.ts
+)
 
 set(AUDIOMONITOR_SOURCES
     src/main.cpp
@@ -39,22 +44,75 @@ elseif(UNIX AND NOT APPLE)
         src/core/realtime_audio.h
     )
 else()
-    message(FATAL_ERROR "AudioMonitor 仅支持 Windows 与 Linux")
+    message(FATAL_ERROR "AudioMonitor supports Windows and Linux only")
 endif()
 
-# WIN32: Windows GUI 子系统（无控制台窗口）
+# WIN32: Windows GUI subsystem (no console window).
 add_executable(audiomonitor WIN32 ${AUDIOMONITOR_SOURCES})
 
 target_include_directories(audiomonitor PRIVATE src)
 target_link_libraries(audiomonitor PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
 
+if(BUILD_TESTING)
+    # Exercise GUI session/reconnect state with a fake router. The production
+    # platform backend is linked but never constructed by this test.
+    set(MAINWINDOW_TEST_SOURCES ${AUDIOMONITOR_SOURCES})
+    list(REMOVE_ITEM MAINWINDOW_TEST_SOURCES src/main.cpp)
+    add_executable(mainwindow_tests
+        tests/mainwindow_test.cpp
+        ${MAINWINDOW_TEST_SOURCES}
+    )
+    target_include_directories(mainwindow_tests PRIVATE src)
+    target_link_libraries(mainwindow_tests PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
+    if(WIN32)
+        target_link_libraries(mainwindow_tests PRIVATE ole32 avrt)
+    elseif(UNIX AND NOT APPLE)
+        target_link_libraries(mainwindow_tests PRIVATE PkgConfig::PIPEWIRE)
+    endif()
+endif()
+
+set(AUDIOMONITOR_TRANSLATION_TARGETS audiomonitor)
+if(BUILD_TESTING)
+    list(APPEND AUDIOMONITOR_TRANSLATION_TARGETS mainwindow_tests)
+endif()
+
+if(QT_VERSION_MAJOR EQUAL 6)
+    # Compile and embed both catalogs in the application and GUI test target
+    # so they exercise the same resource paths.
+    qt_add_translations(TARGETS ${AUDIOMONITOR_TRANSLATION_TARGETS}
+        TS_FILES ${AUDIOMONITOR_TRANSLATIONS}
+        RESOURCE_PREFIX "/translations"
+    )
+else()
+    # Qt 5 does not provide qt_add_translations(). Generate the catalogs once
+    # and share one resource source with each target using the same prefix.
+    qt5_add_translation(AUDIOMONITOR_QM_FILES ${AUDIOMONITOR_TRANSLATIONS})
+    set(AUDIOMONITOR_QRC "${CMAKE_CURRENT_BINARY_DIR}/audiomonitor_translations.qrc")
+    set(AUDIOMONITOR_QRC_CONTENT "<RCC>\n  <qresource prefix=\"/translations\">\n")
+    foreach(QM_FILE IN LISTS AUDIOMONITOR_QM_FILES)
+        get_filename_component(QM_NAME "${QM_FILE}" NAME)
+        set_source_files_properties("${QM_FILE}" PROPERTIES GENERATED TRUE)
+        string(APPEND AUDIOMONITOR_QRC_CONTENT
+            "    <file alias=\"${QM_NAME}\">${QM_FILE}</file>\n")
+    endforeach()
+    string(APPEND AUDIOMONITOR_QRC_CONTENT "  </qresource>\n</RCC>\n")
+    file(WRITE "${AUDIOMONITOR_QRC}" "${AUDIOMONITOR_QRC_CONTENT}")
+    qt5_add_resources(AUDIOMONITOR_TRANSLATION_RESOURCES "${AUDIOMONITOR_QRC}")
+    foreach(AUDIOMONITOR_TARGET IN LISTS AUDIOMONITOR_TRANSLATION_TARGETS)
+        target_sources(${AUDIOMONITOR_TARGET} PRIVATE
+            ${AUDIOMONITOR_QM_FILES}
+            ${AUDIOMONITOR_TRANSLATION_RESOURCES}
+        )
+    endforeach()
+endif()
+
 if(WIN32)
-    target_link_libraries(audiomonitor PRIVATE ole32)
+    target_link_libraries(audiomonitor PRIVATE ole32 avrt)
 elseif(UNIX AND NOT APPLE)
     target_link_libraries(audiomonitor PRIVATE PkgConfig::PIPEWIRE)
 endif()
 
-# 打包发布时（Windows 用 windeployqt）:
+# For packaging (use windeployqt on Windows):
 #   cmake --install build --prefix dist
 install(TARGETS audiomonitor
     RUNTIME DESTINATION bin
@@ -82,4 +140,6 @@ if(BUILD_TESTING)
     target_link_libraries(ringbuffer_tests PRIVATE Threads::Threads)
     set_target_properties(ringbuffer_tests PROPERTIES AUTOMOC OFF)
     add_test(NAME ringbuffer COMMAND ringbuffer_tests)
+
+    add_test(NAME mainwindow COMMAND mainwindow_tests)
 endif()

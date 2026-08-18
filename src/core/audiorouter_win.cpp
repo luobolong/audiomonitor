@@ -1,10 +1,12 @@
 #include "audiorouter_win.h"
 
-// windows.h 的 min/max 宏会破坏 ringbuffer.h 中的 std::min/std::max
+// windows.h defines min/max macros unless NOMINMAX is set. Those macros would
+// interfere with std::min/std::max in ringbuffer.h.
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <avrt.h>
 #include <objbase.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
@@ -14,24 +16,28 @@
 
 #include "ringbuffer.h"
 
+#include <QCoreApplication>
 #include <QMetaObject>
 #include <QPointer>
 #include <QDebug>
 #include <QString>
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <cmath>
 #include <future>
-#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
 
 namespace {
 
-// 极简 COM 智能指针（不依赖 ATL，兼容 MSVC 与 MinGW）。
+// Minimal COM smart pointer that does not depend on ATL and works with both
+// MSVC and MinGW.
 template <typename T>
 class ComPtr {
 public:
@@ -71,7 +77,7 @@ private:
 
 QString wideToQString(LPCWSTR w)
 {
-    return QString::fromWCharArray(w);
+    return w ? QString::fromWCharArray(w) : QString{};
 }
 
 std::wstring qToWide(const QString& s)
@@ -79,17 +85,77 @@ std::wstring qToWide(const QString& s)
     return std::wstring(reinterpret_cast<const wchar_t*>(s.utf16()));
 }
 
-std::string hresultText(HRESULT hr)
+QString hresultText(HRESULT hr)
 {
     char buf[32];
     std::snprintf(buf, sizeof(buf), "0x%08lX", static_cast<unsigned long>(hr));
-    return std::string(buf);
+    return QString::fromLatin1(buf);
 }
+
+QString winTr(const char* source)
+{
+    return QCoreApplication::translate("AudioRouterWin", source);
+}
+
+// Publish a float through a lock-free 32-bit atomic. A floating-point atomic
+// may use a library lock on some Windows toolchains, which would put an
+// avoidable lock in the render worker's steady-state path.
+static_assert(std::atomic<uint32_t>::is_always_lock_free,
+              "WASAPI realtime volume requires a lock-free 32-bit atomic");
+
+uint32_t encodeFloat(float value) noexcept
+{
+    uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+float decodeFloat(uint32_t bits) noexcept
+{
+    float value = 0.0f;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+// Register a worker with MMCSS after setup succeeds, immediately before its
+// event-driven audio loop. Registration is intentionally best-effort: systems
+// without the service still get the same bounded queue and event-driven
+// behavior.
+class MmcssRegistration final {
+public:
+    void registerCurrentThread() noexcept
+    {
+        reset();
+        m_handle = AvSetMmThreadCharacteristicsW(L"Pro Audio", &m_taskIndex);
+        if (!m_handle)
+            m_handle = AvSetMmThreadCharacteristicsW(L"Audio", &m_taskIndex);
+    }
+
+    ~MmcssRegistration()
+    {
+        reset();
+    }
+
+    void reset() noexcept
+    {
+        if (m_handle)
+            AvRevertMmThreadCharacteristics(m_handle);
+        m_handle = nullptr;
+        m_taskIndex = 0;
+    }
+
+    MmcssRegistration(const MmcssRegistration&) = delete;
+    MmcssRegistration& operator=(const MmcssRegistration&) = delete;
+
+private:
+    HANDLE m_handle = nullptr;
+    DWORD m_taskIndex = 0;
+};
 
 constexpr UINT32 kChannels = 2;
 constexpr size_t kQueueBufferDurationMs = 50;
 
-// 检查 WAVEFORMATEX 是否为 32-bit IEEE float 格式
+// Check whether a WAVEFORMATEX is 32-bit IEEE float.
 bool isFloat32Format(const WAVEFORMATEX* fmt)
 {
     if (!fmt)
@@ -145,7 +211,7 @@ bool isSupportedIntegerPcmFormat(const WAVEFORMATEX* fmt)
     return true;
 }
 
-// 将整型 PCM 转换为 float32（范围 [-1.0, 1.0]）
+// Convert packed integer PCM to float32 in the range [-1.0, 1.0].
 bool convertPcmToFloat32(const BYTE* src, float* dst, UINT32 frames, UINT32 channels, WORD bitsPerSample)
 {
     if (!src || !dst || frames == 0 || channels == 0)
@@ -166,7 +232,7 @@ bool convertPcmToFloat32(const BYTE* src, float* dst, UINT32 frames, UINT32 chan
             int32_t v = static_cast<int32_t>(src[i * 3])
                       | (static_cast<int32_t>(src[i * 3 + 1]) << 8)
                       | (static_cast<int32_t>(src[i * 3 + 2]) << 16);
-            // 符号扩展
+            // Sign-extend the packed 24-bit value.
             if (v & 0x800000)
                 v |= static_cast<int32_t>(0xFF000000);
             dst[i] = v * (1.0f / 8388608.0f);
@@ -184,20 +250,20 @@ bool convertPcmToFloat32(const BYTE* src, float* dst, UINT32 frames, UINT32 chan
     return false;
 }
 
-// 将多声道音频降混音到立体声
+// Downmix an arbitrary source channel layout to stereo.
 void downmixToStereo(const float* src, float* dst, UINT32 frames, UINT32 srcChannels)
 {
     if (srcChannels == 1) {
-        // 单声道：复制到左右声道
+        // Mono: duplicate the channel to left and right.
         for (UINT32 i = 0; i < frames; ++i) {
             dst[i * 2] = src[i];
             dst[i * 2 + 1] = src[i];
         }
     } else if (srcChannels == 2) {
-        // 立体声：直接复制
+        // Stereo: copy interleaved samples directly.
         std::memcpy(dst, src, frames * 2 * sizeof(float));
     } else if (srcChannels == 6) {
-        // 5.1 环绕声：FL, FR, FC, LFE, BL, BR
+        // 5.1 surround: FL, FR, FC, LFE, BL, BR.
         constexpr float kCenter = 0.707f;  // -3dB
         constexpr float kSurround = 0.707f;
         for (UINT32 i = 0; i < frames; ++i) {
@@ -206,7 +272,7 @@ void downmixToStereo(const float* src, float* dst, UINT32 frames, UINT32 srcChan
             dst[i * 2 + 1] = s[1] + kCenter * s[2] + kSurround * s[5]; // R = FR + FC + BR
         }
     } else if (srcChannels == 8) {
-        // 7.1 环绕声：FL, FR, FC, LFE, BL, BR, SL, SR
+        // 7.1 surround: FL, FR, FC, LFE, BL, BR, SL, SR.
         constexpr float kCenter = 0.707f;
         constexpr float kSurround = 0.5f;
         for (UINT32 i = 0; i < frames; ++i) {
@@ -215,7 +281,7 @@ void downmixToStereo(const float* src, float* dst, UINT32 frames, UINT32 srcChan
             dst[i * 2 + 1] = s[1] + kCenter * s[2] + kSurround * (s[5] + s[7]); // R
         }
     } else {
-        // 其他声道数：简单平均分配
+        // Other channel counts: average alternating channels into each side.
         for (UINT32 i = 0; i < frames; ++i) {
             float left = 0.0f, right = 0.0f;
             for (UINT32 ch = 0; ch < srcChannels; ++ch) {
@@ -232,7 +298,7 @@ void downmixToStereo(const float* src, float* dst, UINT32 frames, UINT32 srcChan
     }
 }
 
-// 构造 float32 WAVEFORMATEXTENSIBLE
+// Construct a stereo float32 WAVEFORMATEXTENSIBLE format.
 WAVEFORMATEXTENSIBLE makeFloat32Format(DWORD sampleRate, UINT32 channels)
 {
     WAVEFORMATEXTENSIBLE fmt = {};
@@ -253,15 +319,17 @@ WAVEFORMATEXTENSIBLE makeFloat32Format(DWORD sampleRate, UINT32 channels)
 } // namespace
 
 // ---------------------------------------------------------------------------
-// WinSession：一次转发会话。捕获/播放各一个工作线程。
-// 每个线程在自己的 MTA 中创建并持有各自的 COM 对象，退出时释放，
-// 避免跨线程公寓（STA/MTA）使用 COM 指针的问题。
+// WinSession represents one forwarding session. Capture and render each run
+// on a worker thread. Each thread creates and owns its COM objects in its own
+// MTA, then releases them before exit; no COM pointer crosses apartments.
 //
-// OBS 风格实时监听原则：
-//   - 使用严格 SPSC RingBuffer（生产者不触碰消费者游标）
-//   - 小容量设计（基于源设备真实采样率，而非"尽可能多缓冲"）
-//   - 生产者发布溢出代次，消费者用自己的游标丢弃陈旧数据
-//   - 低延迟 > 音频完整性
+// Realtime design principles:
+//   - Strict SPSC RingBuffer ownership (the producer never touches the
+//     consumer cursor).
+//   - A small capacity based on the source's actual sample rate.
+//   - The producer publishes a discontinuity generation; the consumer drops
+//     stale queued audio using its own cursor.
+//   - Bounded latency takes priority over preserving old audio.
 // ---------------------------------------------------------------------------
 class WinSession : public std::enable_shared_from_this<WinSession> {
 public:
@@ -269,14 +337,14 @@ public:
         : m_owner(owner),
           m_sourceId(std::move(sourceId)),
           m_targetId(std::move(targetId)),
-          m_volume(std::clamp(volume, 0.0f, 2.0f)),
+          m_volumeBits(encodeFloat(std::clamp(volume, 0.0f, 2.0f))),
           m_stop(false),
           m_running(false),
           m_captureIsFloat32(true),
           m_captureBitsPerSample(32),
           m_captureChannels(2),
           m_captureSampleRate(0),
-          m_ring(nullptr)  // Will be created after discovering sample rate
+          m_ring(nullptr)  // Created after the source sample rate is known.
     {
     }
 
@@ -294,49 +362,53 @@ public:
     // format and the sample-rate-sized queue before the render thread starts.
     // Both initialized WASAPI clients wait behind m_startEvent so no queue
     // callback can race partial session initialization.
-    bool launch(std::string* err)
+    bool launch(QString* err)
     {
         m_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         if (!m_stopEvent) {
-            *err = "无法创建事件对象";
+            *err = winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "Unable to create the stop event"));
             return false;
         }
         m_startEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         if (!m_startEvent) {
-            *err = "无法创建启动事件对象";
+            *err = winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "Unable to create the start event"));
             return false;
         }
 
-        std::promise<std::string> capReady;
+        std::promise<QString> capReady;
         auto capFuture = capReady.get_future();
         m_capThread = std::thread(&WinSession::captureThreadMain, this, std::move(capReady));
 
         using namespace std::chrono_literals;
         if (capFuture.wait_for(5s) == std::future_status::timeout) {
-            *err = "初始化监听源设备超时";
+            *err = winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "Timed out while initializing the source device"));
             requestStop();
             joinThreads();
             return false;
         }
-        const std::string capErr = capFuture.get();
-        if (!capErr.empty()) {
+        const QString capErr = capFuture.get();
+        if (!capErr.isEmpty()) {
             *err = capErr;
             requestStop();
             joinThreads();
             return false;
         }
 
-        std::promise<std::string> renReady;
+        std::promise<QString> renReady;
         auto renFuture = renReady.get_future();
         m_renThread = std::thread(&WinSession::renderThreadMain, this, std::move(renReady));
         if (renFuture.wait_for(5s) == std::future_status::timeout) {
-            *err = "初始化转发目标设备超时";
+            *err = winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "Timed out while initializing the target device"));
             requestStop();
             joinThreads();
             return false;
         }
-        const std::string renErr = renFuture.get();
-        if (!renErr.empty()) {
+        const QString renErr = renFuture.get();
+        if (!renErr.isEmpty()) {
             *err = renErr;
             requestStop();
             joinThreads();
@@ -345,7 +417,8 @@ public:
 
         m_running.store(true, std::memory_order_release);
         if (!SetEvent(m_startEvent)) {
-            *err = "无法启动音频工作线程";
+            *err = winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "Unable to start the audio worker threads"));
             requestStop();
             joinThreads();
             return false;
@@ -375,11 +448,20 @@ public:
     bool usesDevice(const QString& id) const { return m_sourceId == id || m_targetId == id; }
     void setVolume(float v)
     {
-        m_volume.store(std::clamp(v, 0.0f, 2.0f), std::memory_order_relaxed);
+        if (!std::isfinite(v))
+            return;
+        m_volumeBits.store(encodeFloat(std::clamp(v, 0.0f, 2.0f)),
+                           std::memory_order_relaxed);
+    }
+
+    SessionDeviceIds deviceIds() const
+    {
+        return { m_sourceId, m_targetId };
     }
 
 private:
-    // 把错误投递回 GUI 线程（m_owner 销毁后自动丢弃）。
+    // Post an error to the GUI thread. Queued work is dropped if the owner is
+    // already being destroyed.
     void postError(const QString& msg)
     {
         QPointer<AudioRouterWin> owner = m_owner;
@@ -396,7 +478,7 @@ private:
             Qt::QueuedConnection);
     }
 
-    bool waitForSessionStart(const QString& workerName)
+    bool waitForSessionStart(const char* workerName)
     {
         HANDLE waits[2] = { m_stopEvent, m_startEvent };
         const DWORD result = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
@@ -406,18 +488,23 @@ private:
         }
         if (result == WAIT_FAILED) {
             requestStop();
-            postError(QStringLiteral("等待%1启动失败，监听已停止").arg(workerName));
+            postError(winTr(QT_TRANSLATE_NOOP(
+                          "AudioRouterWin", "The %1 worker failed to start; monitoring stopped"))
+                          .arg(winTr(workerName)));
         }
         return false;
     }
 
-    void captureThreadMain(std::promise<std::string> ready)
+    void captureThreadMain(std::promise<QString> ready)
     {
         const HRESULT comResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         if (FAILED(comResult)) {
-            ready.set_value("无法初始化捕获线程 COM（" + hresultText(comResult) + "）");
+            ready.set_value(winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "Unable to initialize capture-thread COM (%1)"))
+                                .arg(hresultText(comResult)));
             return;
         }
+        MmcssRegistration mmcss;
         ComPtr<IMMDeviceEnumerator> enumerator;
         ComPtr<IMMDevice> device;
         ComPtr<IAudioClient> client;
@@ -437,10 +524,11 @@ private:
             client.reset();
             device.reset();
             enumerator.reset();
+            mmcss.reset();
             CoUninitialize();
         };
-        // 初始化失败的公共出口：先交付错误，再做清理。
-        auto fail = [&](const std::string& err) {
+        // Common initialization-failure path: publish the error before cleanup.
+        auto fail = [&](const QString& err) {
             ready.set_value(err);
             finish();
         };
@@ -448,16 +536,25 @@ private:
         HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
                                       IID_PPV_ARGS(enumerator.put()));
         if (FAILED(hr))
-            return fail("无法创建 MMDeviceEnumerator（" + hresultText(hr) + "）");
+            return fail(winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "Unable to create MMDeviceEnumerator (%1)"))
+                            .arg(hresultText(hr)));
         hr = enumerator->GetDevice(qToWide(m_sourceId).c_str(), device.put());
         if (FAILED(hr))
-            return fail("找不到监听源设备：" + m_sourceId.toStdString());
+            return fail(winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "Source device was not found: %1 (%2)"))
+                            .arg(m_sourceId, hresultText(hr)));
         hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
                               reinterpret_cast<void**>(client.put()));
         if (FAILED(hr))
-            return fail("无法激活监听源设备（" + hresultText(hr) + "）");
-        if (FAILED(client->GetMixFormat(&mixFmt)))
-            return fail("无法获取监听源的混音格式");
+            return fail(winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "Unable to activate the source device (%1)"))
+                            .arg(hresultText(hr)));
+        hr = client->GetMixFormat(&mixFmt);
+        if (FAILED(hr))
+            return fail(winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "Unable to obtain the source mix format (%1)"))
+                            .arg(hresultText(hr)));
 
         // Validate the source format before publishing it to the render thread.
         m_captureIsFloat32 = isFloat32Format(mixFmt);
@@ -466,13 +563,18 @@ private:
         m_captureSampleRate = mixFmt->nSamplesPerSec;
 
         if (m_captureChannels == 0 || m_captureChannels > 32) {
-            return fail("监听源设备声道数异常：" + std::to_string(m_captureChannels));
+            return fail(winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "The source device reported an invalid channel count: %1"))
+                            .arg(m_captureChannels));
         }
         if (m_captureSampleRate == 0)
-            return fail("监听源设备采样率异常");
+            return fail(winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "The source device reported an invalid sample rate")));
         if (!m_captureIsFloat32 && !isSupportedIntegerPcmFormat(mixFmt)) {
-            return fail("监听源设备格式不受支持（" + std::to_string(m_captureBitsPerSample)
-                        + "-bit PCM, " + std::to_string(m_captureChannels) + " 声道）");
+            return fail(winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "The source format is unsupported (%1-bit PCM, %2 channels)"))
+                            .arg(m_captureBitsPerSample)
+                            .arg(m_captureChannels));
         }
 
         // Queue storage is configured from the source's actual mix rate. The
@@ -481,27 +583,42 @@ private:
             m_ring = std::make_unique<RingBuffer>(
                 kChannels, m_captureSampleRate, kQueueBufferDurationMs);
         } catch (const std::exception& ex) {
-            return fail("无法创建音频队列：" + std::string(ex.what()));
+            return fail(winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "Unable to create the audio queue: %1"))
+                            .arg(QString::fromLocal8Bit(ex.what())));
         }
 
         event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (!event)
-            return fail("无法创建捕获事件");
-        // 回环捕获必须使用设备混音格式；共享模式 + LOOPBACK 得到"正在播放"的流。
+            return fail(winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "Unable to create the capture event")));
+        // Loopback capture must use the device mix format. Shared mode plus
+        // LOOPBACK exposes the audio currently being played.
         // Shared event-driven streams require both timing arguments to be 0;
         // GetBufferSize below is the resulting WASAPI capacity.
         hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED,
                                 AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
                                 0, 0, mixFmt, nullptr);
         if (FAILED(hr))
-            return fail("初始化回环捕获失败（" + hresultText(hr)
-                        + "）。设备可能被独占模式占用或不可用。");
-        if (FAILED(client->SetEventHandle(event)))
-            return fail("SetEventHandle 失败");
-        if (FAILED(client->GetBufferSize(&captureBufferFrames)))
-            return fail("获取捕获缓冲区大小失败");
-        if (FAILED(client->GetService(IID_PPV_ARGS(cap.put()))))
-            return fail("获取捕获客户端失败");
+            return fail(winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin",
+                "Loopback capture initialization failed (%1). The device may be unavailable or held in exclusive mode."))
+                            .arg(hresultText(hr)));
+        hr = client->SetEventHandle(event);
+        if (FAILED(hr))
+            return fail(winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "SetEventHandle failed (%1)"))
+                            .arg(hresultText(hr)));
+        hr = client->GetBufferSize(&captureBufferFrames);
+        if (FAILED(hr))
+            return fail(winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "Unable to obtain the capture buffer size (%1)"))
+                            .arg(hresultText(hr)));
+        hr = client->GetService(IID_PPV_ARGS(cap.put()));
+        if (FAILED(hr))
+            return fail(winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "Unable to obtain the capture client (%1)"))
+                            .arg(hresultText(hr)));
 
         // Allocate conversion storage before the event loops begin. The
         // WASAPI buffer capacity bounds every packet returned by GetBuffer().
@@ -515,14 +632,20 @@ private:
                                   * kChannels);
             }
         } catch (const std::exception& ex) {
-            return fail("无法分配捕获转换缓冲区：" + std::string(ex.what()));
+            return fail(winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "Unable to allocate capture conversion buffers: %1"))
+                            .arg(QString::fromLocal8Bit(ex.what())));
         }
 
-        if (FAILED(client->Start()))
-            return fail("启动捕获失败");
+        hr = client->Start();
+        if (FAILED(hr))
+            return fail(winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "Unable to start capture (%1)"))
+                            .arg(hresultText(hr)));
 
-        ready.set_value(std::string()); // 初始化成功，通知主线程
-        if (!waitForSessionStart(QStringLiteral("捕获线程"))) {
+        ready.set_value(QString()); // Initialization succeeded.
+        mmcss.registerCurrentThread();
+        if (!waitForSessionStart(QT_TRANSLATE_NOOP("AudioRouterWin", "Capture"))) {
             client->Stop();
             finish();
             return;
@@ -533,10 +656,14 @@ private:
             for (;;) {
                 const DWORD r = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
                 if (r == WAIT_OBJECT_0 || m_stop.load(std::memory_order_acquire))
-                    break; // 正常停止
+                    break; // Normal stop.
                 if (r == WAIT_FAILED) {
-                    requestStop();
-                    postError(QStringLiteral("等待捕获事件失败，监听已停止"));
+                    if (!m_stop.load(std::memory_order_acquire)) {
+                        requestStop();
+                        postError(winTr(QT_TRANSLATE_NOOP(
+                            "AudioRouterWin",
+                            "Waiting for the capture event failed; monitoring stopped")));
+                    }
                     break;
                 }
                 if (r != WAIT_OBJECT_0 + 1)
@@ -549,7 +676,9 @@ private:
                         failed = true;
                         if (!m_stop.load(std::memory_order_acquire)) {
                             requestStop();
-                            postError(QStringLiteral("监听源设备已失效，监听已停止"));
+                            postError(winTr(QT_TRANSLATE_NOOP(
+                                "AudioRouterWin",
+                                "The source device became unavailable; monitoring stopped")));
                         }
                         break;
                     }
@@ -563,7 +692,9 @@ private:
                         failed = true;
                         if (!m_stop.load(std::memory_order_acquire)) {
                             requestStop();
-                            postError(QStringLiteral("读取监听源数据失败，监听已停止"));
+                            postError(winTr(QT_TRANSLATE_NOOP(
+                                "AudioRouterWin",
+                                "Reading capture data failed; monitoring stopped")));
                         }
                         break;
                     }
@@ -576,19 +707,19 @@ private:
                     } else {
                         const float* floatData = nullptr;
 
-                        // 步骤1：格式转换（如需要）
+                        // Step 1: convert the source format when required.
                         if (m_captureIsFloat32) {
                             floatData = reinterpret_cast<const float*>(data);
                         } else {
                             if (!convertPcmToFloat32(data, convBuf.data(), frames, m_captureChannels, m_captureBitsPerSample)) {
-                                // 转换失败，跳过此包
+                                // Skip a packet that cannot be converted.
                                 cap->ReleaseBuffer(frames);
                                 continue;
                             }
                             floatData = convBuf.data();
                         }
 
-                        // 步骤2：声道降混音（如需要）
+                        // Step 2: downmix to stereo when required.
                         const float* finalData = floatData;
                         if (m_captureChannels != kChannels) {
                             downmixToStereo(floatData, downmixBuf.data(), frames, m_captureChannels);
@@ -602,8 +733,12 @@ private:
 
                     if (FAILED(cap->ReleaseBuffer(frames))) {
                         failed = true;
-                        requestStop();
-                        postError(QStringLiteral("释放监听源数据失败，监听已停止"));
+                        if (!m_stop.load(std::memory_order_acquire)) {
+                            requestStop();
+                            postError(winTr(QT_TRANSLATE_NOOP(
+                                "AudioRouterWin",
+                                "Releasing capture data failed; monitoring stopped")));
+                        }
                         break;
                     }
                 }
@@ -616,13 +751,16 @@ private:
         finish();
     }
 
-    void renderThreadMain(std::promise<std::string> ready)
+    void renderThreadMain(std::promise<QString> ready)
     {
         const HRESULT comResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         if (FAILED(comResult)) {
-            ready.set_value("无法初始化播放线程 COM（" + hresultText(comResult) + "）");
+            ready.set_value(winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "Unable to initialize render-thread COM (%1)"))
+                                .arg(hresultText(comResult)));
             return;
         }
+        MmcssRegistration mmcss;
         ComPtr<IMMDeviceEnumerator> enumerator;
         ComPtr<IMMDevice> device;
         ComPtr<IAudioClient> client;
@@ -637,9 +775,10 @@ private:
             client.reset();
             device.reset();
             enumerator.reset();
+            mmcss.reset();
             CoUninitialize();
         };
-        auto fail = [&](const std::string& err) {
+        auto fail = [&](const QString& err) {
             ready.set_value(err);
             cleanup();
         };
@@ -647,21 +786,30 @@ private:
         HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
                                       IID_PPV_ARGS(enumerator.put()));
         if (FAILED(hr))
-            return fail("无法创建 MMDeviceEnumerator（" + hresultText(hr) + "）");
+            return fail(winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "Unable to create MMDeviceEnumerator (%1)"))
+                            .arg(hresultText(hr)));
 
         // captureThreadMain published this value through capReady before this
         // thread was created, so the render format and queue use one rate.
         const WAVEFORMATEXTENSIBLE renderFmt =
             makeFloat32Format(m_captureSampleRate, kChannels);
 
-        if (FAILED(enumerator->GetDevice(qToWide(m_targetId).c_str(), device.put())))
-            return fail("找不到转发目标设备：" + m_targetId.toStdString());
-        if (FAILED(device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
-                                    reinterpret_cast<void**>(client.put()))))
-            return fail("无法激活转发目标设备");
+        hr = enumerator->GetDevice(qToWide(m_targetId).c_str(), device.put());
+        if (FAILED(hr))
+            return fail(winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "Target device was not found: %1 (%2)"))
+                            .arg(m_targetId, hresultText(hr)));
+        hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+                              reinterpret_cast<void**>(client.put()));
+        if (FAILED(hr))
+            return fail(winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "Unable to activate the target device (%1)"))
+                            .arg(hresultText(hr)));
         event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (!event)
-            return fail("无法创建播放事件");
+            return fail(winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "Unable to create the render event")));
         const DWORD flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
                             | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
         // Shared event-driven streams require both timing arguments to be 0;
@@ -669,18 +817,33 @@ private:
         hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 0, 0,
                                &renderFmt.Format, nullptr);
         if (FAILED(hr))
-            return fail("转发目标设备不支持该音频格式（" + hresultText(hr) + "）");
-        if (FAILED(client->GetBufferSize(&bufferFrames)))
-            return fail("获取播放缓冲区大小失败");
-        if (FAILED(client->SetEventHandle(event)))
-            return fail("SetEventHandle 失败");
-        if (FAILED(client->GetService(IID_PPV_ARGS(ren.put()))))
-            return fail("获取播放客户端失败");
-        if (FAILED(client->Start()))
-            return fail("启动播放失败");
+            return fail(winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "The target device rejected the audio format (%1)"))
+                            .arg(hresultText(hr)));
+        hr = client->GetBufferSize(&bufferFrames);
+        if (FAILED(hr))
+            return fail(winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "Unable to obtain the render buffer size (%1)"))
+                            .arg(hresultText(hr)));
+        hr = client->SetEventHandle(event);
+        if (FAILED(hr))
+            return fail(winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "SetEventHandle failed (%1)"))
+                            .arg(hresultText(hr)));
+        hr = client->GetService(IID_PPV_ARGS(ren.put()));
+        if (FAILED(hr))
+            return fail(winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "Unable to obtain the render client (%1)"))
+                            .arg(hresultText(hr)));
+        hr = client->Start();
+        if (FAILED(hr))
+            return fail(winTr(QT_TRANSLATE_NOOP(
+                "AudioRouterWin", "Unable to start rendering (%1)"))
+                            .arg(hresultText(hr)));
 
-        ready.set_value(std::string()); // 初始化成功
-        if (!waitForSessionStart(QStringLiteral("播放线程"))) {
+        ready.set_value(QString()); // Initialization succeeded.
+        mmcss.registerCurrentThread();
+        if (!waitForSessionStart(QT_TRANSLATE_NOOP("AudioRouterWin", "Render"))) {
             client->Stop();
             cleanup();
             return;
@@ -693,8 +856,12 @@ private:
                 if (r == WAIT_OBJECT_0 || m_stop.load(std::memory_order_acquire))
                     break;
                 if (r == WAIT_FAILED) {
-                    requestStop();
-                    postError(QStringLiteral("等待播放事件失败，监听已停止"));
+                    if (!m_stop.load(std::memory_order_acquire)) {
+                        requestStop();
+                        postError(winTr(QT_TRANSLATE_NOOP(
+                            "AudioRouterWin",
+                            "Waiting for the render event failed; monitoring stopped")));
+                    }
                     break;
                 }
                 if (r != WAIT_OBJECT_0 + 1)
@@ -702,8 +869,12 @@ private:
 
                 UINT32 padding = 0;
                 if (FAILED(client->GetCurrentPadding(&padding))) {
-                    requestStop();
-                    postError(QStringLiteral("转发目标设备已失效，监听已停止"));
+                    if (!m_stop.load(std::memory_order_acquire)) {
+                        requestStop();
+                        postError(winTr(QT_TRANSLATE_NOOP(
+                            "AudioRouterWin",
+                            "The target device became unavailable; monitoring stopped")));
+                    }
                     break;
                 }
                 if (padding >= bufferFrames)
@@ -712,19 +883,27 @@ private:
                 const UINT32 avail = bufferFrames - padding;
                 BYTE* data = nullptr;
                 if (FAILED(ren->GetBuffer(avail, &data))) {
-                    requestStop();
-                    postError(QStringLiteral("获取转发目标缓冲区失败，监听已停止"));
+                    if (!m_stop.load(std::memory_order_acquire)) {
+                        requestStop();
+                        postError(winTr(QT_TRANSLATE_NOOP(
+                            "AudioRouterWin",
+                            "Obtaining the render buffer failed; monitoring stopped")));
+                    }
                     break;
                 }
 
                 const size_t readFrames = m_ring->read(
                     reinterpret_cast<float*>(data), avail,
-                    m_volume.load(std::memory_order_relaxed));
+                    decodeFloat(m_volumeBits.load(std::memory_order_relaxed)));
                 const DWORD releaseFlags = readFrames == 0
                     ? AUDCLNT_BUFFERFLAGS_SILENT : 0;
                 if (FAILED(ren->ReleaseBuffer(avail, releaseFlags))) {
-                    requestStop();
-                    postError(QStringLiteral("提交转发目标缓冲区失败，监听已停止"));
+                    if (!m_stop.load(std::memory_order_acquire)) {
+                        requestStop();
+                        postError(winTr(QT_TRANSLATE_NOOP(
+                            "AudioRouterWin",
+                            "Submitting the render buffer failed; monitoring stopped")));
+                    }
                     break;
                 }
             }
@@ -740,7 +919,7 @@ private:
     // Published by capReady before render thread creation. Destroyed only after
     // both producer and consumer threads have joined.
     std::unique_ptr<RingBuffer> m_ring;
-    std::atomic<float> m_volume;
+    std::atomic<uint32_t> m_volumeBits;
     std::atomic<bool> m_stop;
     std::atomic<bool> m_running;
     HANDLE m_stopEvent = nullptr;
@@ -748,7 +927,7 @@ private:
     std::thread m_capThread;
     std::thread m_renThread;
 
-    // 捕获格式信息
+    // Capture format published by the capture worker before render startup.
     bool m_captureIsFloat32;
     WORD m_captureBitsPerSample;
     UINT32 m_captureChannels;
@@ -756,7 +935,7 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// NotificationClient：监听设备热插拔/默认设备变化。
+// NotificationClient watches for device hotplug and default-device changes.
 // MMDevice callbacks may arrive off the GUI thread; all router work is queued.
 // ---------------------------------------------------------------------------
 class NotificationClient final : public IMMNotificationClient {
@@ -949,7 +1128,8 @@ QVector<DeviceInfo> AudioRouterWin::outputDevices()
             PropVariantClear(&v);
         }
         if (info.name.isEmpty())
-            info.name = QStringLiteral("输出设备 %1").arg(i + 1);
+            info.name = winTr(QT_TRANSLATE_NOOP("AudioRouterWin", "Output device %1"))
+                            .arg(i + 1);
         result.append(info);
     }
     return result;
@@ -957,27 +1137,43 @@ QVector<DeviceInfo> AudioRouterWin::outputDevices()
 
 bool AudioRouterWin::start(const QString& sourceId, const QString& targetId, float volume)
 {
+    if (!std::isfinite(volume)) {
+        emit errorOccurred(winTr(QT_TRANSLATE_NOOP(
+            "AudioRouterWin", "Monitoring volume must be a finite number")));
+        return false;
+    }
+    if (sourceId.isEmpty() || targetId.isEmpty()) {
+        emit errorOccurred(winTr(QT_TRANSLATE_NOOP(
+            "AudioRouterWin", "The source and target must be valid devices")));
+        return false;
+    }
     if (sourceId == targetId) {
-        emit errorOccurred(QStringLiteral(
-            "监听源和转发目标不能是同一设备，否则会形成音频反馈回路"));
+        emit errorOccurred(winTr(QT_TRANSLATE_NOOP(
+            "AudioRouterWin",
+            "The source and target must be different to prevent an audio feedback loop")));
         return false;
     }
     stop();
     auto session = std::make_shared<WinSession>(this, sourceId, targetId, volume);
-    std::string err;
+    QString err;
     if (!session->launch(&err)) {
-        emit errorOccurred(QString::fromStdString(err));
+        emit errorOccurred(err);
         return false;
     }
     m_session = std::move(session);
+    // Capture the IDs only after both WASAPI workers have initialized. This
+    // snapshot is independent of subsequent GUI device-list refreshes.
+    m_lastSessionDeviceIds = { sourceId, targetId };
     emit started();
     return true;
 }
 
 void AudioRouterWin::stop()
 {
-    if (!m_session)
+    if (!m_session) {
+        m_lastSessionDeviceIds = {};
         return;
+    }
     stopSession(QString(), StopReason::UserRequested);
 }
 
@@ -985,9 +1181,14 @@ void AudioRouterWin::stopSession(const QString& reason, StopReason stopReason)
 {
     if (!m_session)
         return;
+    const SessionDeviceIds sessionIds = m_session->deviceIds();
     m_session->requestStop();
     m_session->joinThreads();
     m_session.reset();
+    if (stopReason == StopReason::DeviceFailure || stopReason == StopReason::ServiceFailure)
+        m_lastSessionDeviceIds = sessionIds;
+    else
+        m_lastSessionDeviceIds = {};
     if (!reason.isEmpty())
         emit errorOccurred(reason);
     emit stopped(stopReason);
@@ -996,6 +1197,11 @@ void AudioRouterWin::stopSession(const QString& reason, StopReason stopReason)
 bool AudioRouterWin::isRunning() const
 {
     return m_session && m_session->isRunning();
+}
+
+SessionDeviceIds AudioRouterWin::lastSessionDeviceIds() const
+{
+    return m_lastSessionDeviceIds;
 }
 
 void AudioRouterWin::setVolume(float volume)
@@ -1018,5 +1224,7 @@ void AudioRouterWin::notifyDevicesChanged()
 void AudioRouterWin::notifyDeviceGone(const QString& id)
 {
     if (m_session && m_session->usesDevice(id))
-        stopSession(QStringLiteral("正在使用的音频设备已移除或停用"), StopReason::DeviceFailure);
+        stopSession(winTr(QT_TRANSLATE_NOOP(
+                        "AudioRouterWin", "The audio device in use was removed or disabled")),
+                    StopReason::DeviceFailure);
 }

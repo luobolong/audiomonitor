@@ -1,0 +1,43 @@
+# Maintainer: AudioMonitor contributors
+pkgname=audiomonitor
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Audio monitoring and forwarding tool using native PipeWire"
+arch=('x86_64')
+url="https://github.com/luobolong/audiomonitor"
+license=('MIT')
+depends=('qt6-base' 'pipewire')
+makedepends=('cmake' 'ninja' 'pkgconf' 'qt6-tools')
+source=("${pkgname}-${pkgver}.tar.gz::https://github.com/luobolong/audiomonitor/archive/refs/tags/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cd "${srcdir}/${pkgname}-${pkgver}"
+    cmake -S . -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -DBUILD_TESTING=OFF
+    cmake --build build
+}
+
+package() {
+    cd "${srcdir}/${pkgname}-${pkgver}"
+    DESTDIR="${pkgdir}" cmake --install build
+
+    install -Dm644 packaging/audiomonitor.desktop \
+        "${pkgdir}/usr/share/applications/audiomonitor.desktop"
+    install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+    install -Dm644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+
+    if [[ -x packaging/create-icon.sh ]]; then
+        mkdir -p "${pkgdir}/usr/share/icons/hicolor/256x256/apps"
+        packaging/create-icon.sh \
+            "${pkgdir}/usr/share/icons/hicolor/256x256/apps"
+    fi
+
+    while IFS= read -r -d '' qm_file; do
+        install -Dm644 "$qm_file" \
+            "${pkgdir}/usr/share/audiomonitor/translations/$(basename "$qm_file")"
+    done < <(find build -type f \( -name 'audiomonitor_en.qm' \
+        -o -name 'audiomonitor_zh_CN.qm' \) -print0)
+}

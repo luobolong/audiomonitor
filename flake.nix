@@ -1,5 +1,5 @@
 {
-  description = "AudioMonitor — 跨平台输出设备音频监听转发工具";
+  description = "AudioMonitor: cross-platform output-device audio monitor";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -19,7 +19,7 @@
           default = pkgs.callPackage ./default.nix { };
         });
 
-      # nix develop / nix shell：完整开发环境（Qt6 + PipeWire + cmake）
+      # nix develop / nix shell: complete Qt 6, PipeWire, and CMake environment.
       devShells = forAllSystems (system:
         let pkgs = nixpkgs.legacyPackages.${system};
         in {

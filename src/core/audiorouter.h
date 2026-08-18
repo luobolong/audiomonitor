@@ -4,30 +4,38 @@
 #include <QString>
 #include <QVector>
 
-// 音频输出设备信息。id 为平台相关的稳定标识：
-//  - Windows: WASAPI 端点 ID
-//  - Linux:   PipeWire object.serial（不可用时回退到 node.name）
+// Output device information. The ID is a platform-specific stable identifier:
+//  - Windows: WASAPI endpoint ID
+//  - Linux:   PipeWire object.serial, falling back to node.name when absent
 struct DeviceInfo {
     QString id;
     QString name;
     bool isDefault = false;
 };
 
-// 转发停止的原因，用于判断是否值得自动重连。
+// Device IDs captured from the most recently started audio session.  Backends
+// keep this snapshot independent of any GUI device-list model so a refresh
+// cannot change the IDs used for automatic recovery.
+struct SessionDeviceIds {
+    QString sourceId;
+    QString targetId;
+};
+
+// Why forwarding stopped, used to decide whether automatic recovery is useful.
 enum class StopReason {
-    UserRequested, // 用户主动停止 / 程序退出
-    DeviceFailure, // 设备被移除、断开或流异常终止
-    ServiceFailure // 音频服务（PipeWire、Windows Audio）不可用
+    UserRequested, // Explicit stop or application shutdown.
+    DeviceFailure, // Device removal, disconnect, or stream failure.
+    ServiceFailure // PipeWire or Windows Audio is unavailable.
 };
 Q_DECLARE_METATYPE(StopReason)
 
-// 音频监听转发引擎的抽象接口。
+// Abstract audio monitoring and forwarding engine.
 //
-// 语义与 OBS 的"音频监听"一致：
-//  监听源 = 一个【输出设备】（抓取其正在播放的音频，即回环/监听端口）；
-//  转发目标 = 另一个【输出设备】（把抓到的音频播放过去）。
+// The source is an output device whose currently playing audio is captured
+// through a loopback/monitor path. The target is a different output device
+// that receives the captured audio.
 //
-// start() 之前应先在 GUI 线程调用 outputDevices() 获取可选设备。
+// Call outputDevices() from the GUI thread before start().
 class AudioRouter : public QObject {
     Q_OBJECT
 public:
@@ -35,33 +43,39 @@ public:
     static AudioRouter* create(QObject* parent = nullptr);
     ~AudioRouter() override = default;
 
-    // 枚举可作为监听源/转发目标的输出设备（GUI 线程调用，内部会等待枚举完成）。
+    // Enumerate output devices usable as source or target (GUI thread only).
     virtual QVector<DeviceInfo> outputDevices() = 0;
 
-    // 开始转发。volume 范围 0.0 ~ 2.0（1.0 = 原始音量）。
-    // 成功返回 true 并发出 started()；失败返回 false 并发出 errorOccurred()。
+    // Start forwarding. volume is in the range 0.0 to 2.0 (1.0 is unity).
+    // On success emits started(); on failure returns false and emits an error.
     virtual bool start(const QString& sourceId, const QString& targetId, float volume) = 0;
 
-    // 停止转发（未运行时为空操作）。停止后发出 stopped()。
+    // Stop forwarding. Stopping an idle router is a no-op.
     virtual void stop() = 0;
 
     virtual bool isRunning() const = 0;
 
-    // 运行中实时调节音量，范围 0.0 ~ 2.0。
+    // Return the IDs used by the current session, or by the session that most
+    // recently stopped because of a device/service failure.  The default is
+    // empty for backends that do not expose session recovery state.
+    virtual SessionDeviceIds lastSessionDeviceIds() const { return {}; }
+
+    // Change the volume while running, in the range 0.0 to 2.0.
     virtual void setVolume(float volume) = 0;
 
-    // 调试导出是后端可选能力；不支持的后端会通过 errorOccurred() 明确拒绝。
-    // 把捕获到的原始 float32 交错音频写入指定文件（空路径=禁用）。
+    // Debug dumps are optional backend capabilities. Unsupported backends
+    // reject them through errorOccurred(). Capture output is interleaved
+    // float32 audio; an empty path disables the dump.
     virtual void setCaptureDumpFile(const QString& path) { Q_UNUSED(path); }
-    // 调试用：把写入播放流的原始数据导出到文件。
+    // Debug-only dump of raw data submitted to the render stream.
     virtual void setPlaybackDumpFile(const QString& path) { Q_UNUSED(path); }
-    // 调试用：记录每次播放回调的字节数。
+    // Debug-only log of the byte count submitted by each render callback.
     virtual void setCallbackDumpFile(const QString& path) { Q_UNUSED(path); }
 
 signals:
     void started();
-    // reason 说明本次停止是否由设备/服务故障引起，供上层决定是否自动重连。
+    // reason lets the application distinguish faults from an explicit stop.
     void stopped(StopReason reason = StopReason::UserRequested);
     void errorOccurred(const QString& message);
-    void deviceListChanged();   // 设备热插拔/默认设备变化
+    void deviceListChanged();   // Device hotplug or default-device change.
 };

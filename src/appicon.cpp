@@ -7,7 +7,7 @@
 
 namespace {
 
-// 在 rect 内按相对坐标绘制白色扬声器与声波
+// Draw the white speaker and sound waves using coordinates relative to rect.
 void paintSpeaker(QPainter& p, const QRectF& r)
 {
     const qreal s = r.width();

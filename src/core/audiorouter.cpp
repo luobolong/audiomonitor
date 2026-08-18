@@ -5,7 +5,7 @@
 #elif defined(Q_OS_LINUX)
 #include "audiorouter_linux.h"
 #else
-#error "AudioMonitor 仅支持 Windows 与 Linux"
+#error "AudioMonitor supports only Windows and Linux"
 #endif
 
 AudioRouter* AudioRouter::create(QObject* parent)

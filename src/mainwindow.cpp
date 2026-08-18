@@ -4,16 +4,20 @@
 #include "core/audiorouter.h"
 
 #include <QAction>
+#include <QActionGroup>
 #include <QApplication>
 #include <QCloseEvent>
 #include <QComboBox>
+#include <QEvent>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMenu>
 #include <QMessageBox>
+#include <QLocale>
 #include <QPushButton>
 #include <QSettings>
+#include <QTranslator>
 
 #include <iterator>
 #include <QSlider>
@@ -22,17 +26,52 @@
 #include <QVBoxLayout>
 
 namespace {
-// 重连退避序列（毫秒）与上限：设备重新枚举通常需要 1~2 秒。
+// Reconnect backoff sequence (milliseconds). Device re-enumeration normally
+// completes within a few seconds.
 constexpr int kReconnectDelaysMs[] = {1000, 2000, 4000, 8000, 15000};
 constexpr int kMaxReconnectAttempts = int(std::size(kReconnectDelaysMs));
+
+constexpr auto kLanguageSetting = "ui/language";
+constexpr auto kEnglishLanguage = "en";
+constexpr auto kSimplifiedChineseLanguage = "zh_CN";
+constexpr int kDeviceNameRole = Qt::UserRole + 1;
+constexpr int kDeviceDefaultRole = Qt::UserRole + 2;
+
+QString colorStatus(const QString& color, const QString& text)
+{
+    return QStringLiteral("<span style='color:%1;'>%2</span>").arg(color, text);
+}
 } // namespace
 
-MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
+MainWindow::MainWindow(QWidget* parent)
+    : MainWindow(nullptr, parent)
 {
-    setWindowTitle(QStringLiteral("音频监听转发 — AudioMonitor"));
+}
+
+MainWindow::MainWindow(AudioRouter* router, QWidget* parent)
+    : QMainWindow(parent)
+    , m_router(router)
+{
     setWindowIcon(makeAppIcon());
 
-    m_router = AudioRouter::create(this);
+    m_languageCode = configuredLanguage();
+    m_translator = new QTranslator(this);
+    // Install the catalog before creating widgets so their initial text is translated.
+    if (m_languageCode == QLatin1String(kSimplifiedChineseLanguage)) {
+        const QString path = QStringLiteral(":/translations/audiomonitor_%1.qm")
+                                  .arg(m_languageCode);
+        if (m_translator->load(path))
+            qApp->installTranslator(m_translator);
+        else
+            m_languageCode = QLatin1String(kEnglishLanguage);
+    }
+
+    // Backend construction can produce human-readable initialization errors,
+    // so create the production router only after the selected catalog is active.
+    if (!m_router)
+        m_router = AudioRouter::create(this);
+    else if (!m_router->parent())
+        m_router->setParent(this);
 
     buildUi();
 
@@ -48,7 +87,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
     loadSettings();
     refreshDevices();
 
-    // 应用持久化的选择（第一次 refreshDevices 已按 id 尝试恢复）
+    // Apply persisted selections after the first device refresh.
     applySavedSelection(m_source, m_savedSourceId, m_savedSourceName);
     applySavedSelection(m_target, m_savedTargetId, m_savedTargetName);
     m_savedSourceId.clear();
@@ -61,6 +100,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
 
 MainWindow::~MainWindow()
 {
+    if (m_translator)
+        qApp->removeTranslator(m_translator);
     saveSettings();
     if (m_router)
         m_router->stop();
@@ -78,27 +119,27 @@ void MainWindow::buildUi()
     form->setHorizontalSpacing(12);
     form->setVerticalSpacing(10);
 
-    // 设备选择
     m_source = new QComboBox(central);
+    m_source->setObjectName(QStringLiteral("sourceDeviceCombo"));
     m_source->setMinimumWidth(320);
     auto* sourceRow = new QHBoxLayout();
     sourceRow->addWidget(m_source, 1);
-    m_refresh = new QPushButton(QStringLiteral("刷新设备"), central);
+    m_refresh = new QPushButton(central);
     sourceRow->addWidget(m_refresh);
-    form->addRow(QStringLiteral("监听源（输出设备）："), sourceRow);
+    m_sourceTitle = new QLabel(central);
+    form->addRow(m_sourceTitle, sourceRow);
 
     m_target = new QComboBox(central);
+    m_target->setObjectName(QStringLiteral("targetDeviceCombo"));
     m_target->setMinimumWidth(320);
-    form->addRow(QStringLiteral("转发到（输出设备）："), m_target);
+    m_targetTitle = new QLabel(central);
+    form->addRow(m_targetTitle, m_target);
 
-    auto* hint = new QLabel(
-        QStringLiteral("监听源是「正在播放声音的输出设备」，其音频将被实时转发到目标设备。"),
-        central);
-    hint->setWordWrap(true);
-    hint->setStyleSheet(QStringLiteral("color: #666; font-size: 12px;"));
-    form->addRow(QString(), hint);
+    m_hint = new QLabel(central);
+    m_hint->setWordWrap(true);
+    m_hint->setStyleSheet(QStringLiteral("color: #666; font-size: 12px;"));
+    form->addRow(QString(), m_hint);
 
-    // 音量
     m_volume = new QSlider(Qt::Horizontal, central);
     m_volume->setRange(0, 200);
     m_volume->setValue(100);
@@ -109,11 +150,11 @@ void MainWindow::buildUi()
     auto* volRow = new QHBoxLayout();
     volRow->addWidget(m_volume, 1);
     volRow->addWidget(m_volumeLabel);
-    form->addRow(QStringLiteral("监听音量："), volRow);
+    m_volumeTitle = new QLabel(central);
+    form->addRow(m_volumeTitle, volRow);
 
     root->addLayout(form);
 
-    // 状态 + 启停
     m_status = new QLabel(central);
     m_status->setWordWrap(true);
     m_status->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -127,17 +168,30 @@ void MainWindow::buildUi()
     setCentralWidget(central);
     resize(520, sizeHint().height());
 
-    // 系统托盘
     m_tray = new QSystemTrayIcon(makeAppIcon(), this);
     m_trayMenu = new QMenu(this);
-    m_trayShow = m_trayMenu->addAction(QStringLiteral("打开主窗口"));
-    m_trayStartStop = m_trayMenu->addAction(QStringLiteral("开始监听"));
+    m_trayShow = new QAction(this);
+    m_trayStartStop = new QAction(this);
+    m_trayMenu->addAction(m_trayShow);
+    m_trayMenu->addAction(m_trayStartStop);
     m_trayMenu->addSeparator();
-    m_trayQuit = m_trayMenu->addAction(QStringLiteral("退出"));
+    m_trayQuit = new QAction(this);
+    m_trayMenu->addAction(m_trayQuit);
+    m_languageMenu = new QMenu(this);
+    m_trayMenu->addMenu(m_languageMenu);
+    m_languageGroup = new QActionGroup(this);
+    m_languageGroup->setExclusive(true);
+    m_languageEnglish = new QAction(this);
+    m_languageChinese = new QAction(this);
+    m_languageGroup->addAction(m_languageEnglish);
+    m_languageGroup->addAction(m_languageChinese);
+    m_languageMenu->addAction(m_languageEnglish);
+    m_languageMenu->addAction(m_languageChinese);
+    m_languageEnglish->setCheckable(true);
+    m_languageChinese->setCheckable(true);
     m_tray->setContextMenu(m_trayMenu);
     m_tray->show();
 
-    // 连接
     connect(m_refresh, &QPushButton::clicked, this, &MainWindow::refreshDevices);
     connect(m_volume, &QSlider::valueChanged, this, &MainWindow::onVolumeChanged);
     connect(m_startStop, &QPushButton::clicked, this, &MainWindow::startStopClicked);
@@ -145,6 +199,148 @@ void MainWindow::buildUi()
     connect(m_trayShow, &QAction::triggered, this, &MainWindow::showMainWindow);
     connect(m_trayStartStop, &QAction::triggered, this, &MainWindow::startStopClicked);
     connect(m_trayQuit, &QAction::triggered, this, &MainWindow::quitApp);
+    connect(m_languageEnglish, &QAction::triggered, this, &MainWindow::selectEnglish);
+    connect(m_languageChinese, &QAction::triggered, this, &MainWindow::selectSimplifiedChinese);
+
+    retranslateUi();
+}
+
+QString MainWindow::defaultLanguage() const
+{
+    return QLocale::system().language() == QLocale::Chinese
+        ? QString::fromLatin1(kSimplifiedChineseLanguage)
+        : QString::fromLatin1(kEnglishLanguage);
+}
+
+QString MainWindow::configuredLanguage() const
+{
+    QSettings settings;
+    const QString configured = settings.value(QString::fromLatin1(kLanguageSetting)).toString();
+    if (configured == QLatin1String(kEnglishLanguage)
+        || configured == QLatin1String(kSimplifiedChineseLanguage)) {
+        return configured;
+    }
+    return defaultLanguage();
+}
+
+bool MainWindow::installLanguage(const QString& language, bool persist)
+{
+    const QString normalized = language == QLatin1String(kSimplifiedChineseLanguage)
+        ? QString::fromLatin1(kSimplifiedChineseLanguage)
+        : QString::fromLatin1(kEnglishLanguage);
+    const QString path = QStringLiteral(":/translations/audiomonitor_%1.qm").arg(normalized);
+
+    // Validate the catalog before removing the currently active one. English
+    // may safely fall back to source strings if its catalog is unavailable.
+    QTranslator candidate;
+    const bool loaded = candidate.load(path);
+    if (normalized == QLatin1String(kSimplifiedChineseLanguage) && !loaded) {
+        updateLanguageActions();
+        return false;
+    }
+
+    if (m_translator) {
+        qApp->removeTranslator(m_translator);
+        delete m_translator;
+        m_translator = nullptr;
+    }
+    if (loaded) {
+        m_translator = new QTranslator(this);
+        if (m_translator->load(path))
+            qApp->installTranslator(m_translator);
+    }
+
+    m_languageCode = normalized;
+    if (persist) {
+        QSettings settings;
+        settings.setValue(QString::fromLatin1(kLanguageSetting), m_languageCode);
+        settings.sync();
+    }
+    retranslateUi();
+    return true;
+}
+
+void MainWindow::selectEnglish()
+{
+    installLanguage(QString::fromLatin1(kEnglishLanguage), true);
+}
+
+void MainWindow::selectSimplifiedChinese()
+{
+    installLanguage(QString::fromLatin1(kSimplifiedChineseLanguage), true);
+}
+
+void MainWindow::updateLanguageActions()
+{
+    if (m_languageEnglish)
+        m_languageEnglish->setChecked(m_languageCode == QLatin1String(kEnglishLanguage));
+    if (m_languageChinese)
+        m_languageChinese->setChecked(m_languageCode == QLatin1String(kSimplifiedChineseLanguage));
+}
+
+void MainWindow::retranslateUi()
+{
+    setWindowTitle(tr("AudioMonitor - Audio monitoring and forwarding"));
+    if (m_sourceTitle)
+        m_sourceTitle->setText(tr("Listen source (output device):"));
+    if (m_targetTitle)
+        m_targetTitle->setText(tr("Forward to (output device):"));
+    if (m_volumeTitle)
+        m_volumeTitle->setText(tr("Monitoring volume:"));
+    if (m_refresh)
+        m_refresh->setText(tr("Refresh devices"));
+    if (m_hint) {
+        m_hint->setText(tr("The listen source is the output device that is currently playing audio. "
+                           "Its audio is forwarded to the target device in real time."));
+    }
+    if (m_startStop)
+        m_startStop->setText(m_running ? tr("Stop monitoring") : tr("Start monitoring"));
+    if (m_trayShow)
+        m_trayShow->setText(tr("Open main window"));
+    if (m_trayStartStop)
+        m_trayStartStop->setText(m_running ? tr("Stop monitoring") : tr("Start monitoring"));
+    if (m_trayQuit)
+        m_trayQuit->setText(tr("Quit"));
+    if (m_languageMenu)
+        m_languageMenu->setTitle(tr("Language"));
+    if (m_languageEnglish)
+        m_languageEnglish->setText(tr("English"));
+    if (m_languageChinese)
+        m_languageChinese->setText(tr("Simplified Chinese"));
+    updateLanguageActions();
+
+    const QString defaultSuffix = tr(" (default)");
+    const auto updateLabels = [&defaultSuffix](QComboBox* box) {
+        if (!box)
+            return;
+        for (int i = 0; i < box->count(); ++i) {
+            const QVariant nameData = box->itemData(i, kDeviceNameRole);
+            if (!nameData.isValid())
+                continue;
+            QString label = nameData.toString();
+            if (box->itemData(i, kDeviceDefaultRole).toBool())
+                label += defaultSuffix;
+            box->setItemText(i, label);
+        }
+    };
+    updateLabels(m_source);
+    updateLabels(m_target);
+
+    if (m_volumeLabel && m_volume)
+        m_volumeLabel->setText(QStringLiteral("%1%").arg(m_volume->value()));
+
+    // Rebuild state-dependent messages in the newly selected language.
+    if (m_reconnectTimer && m_reconnectTimer->isActive())
+        updateReconnectStatus();
+    else
+        updateUiState();
+}
+
+void MainWindow::changeEvent(QEvent* event)
+{
+    QMainWindow::changeEvent(event);
+    if (event->type() == QEvent::LanguageChange)
+        retranslateUi();
 }
 
 void MainWindow::refreshDevices()
@@ -153,15 +349,21 @@ void MainWindow::refreshDevices()
     const QString tgtId = m_target->currentData().toString();
 
     const QVector<DeviceInfo> devices = m_router->outputDevices();
+    const QString defaultSuffix = tr(" (default)");
 
-    auto fill = [](QComboBox* box, const QVector<DeviceInfo>& list, const QString& prevId) {
+    auto fill = [&defaultSuffix](QComboBox* box,
+                                 const QVector<DeviceInfo>& list,
+                                 const QString& prevId) {
         box->blockSignals(true);
         box->clear();
         for (const DeviceInfo& d : list) {
             QString label = d.name;
             if (d.isDefault)
-                label += QStringLiteral("（默认）");
+                label += defaultSuffix;
             box->addItem(label, d.id);
+            const int index = box->count() - 1;
+            box->setItemData(index, d.name, kDeviceNameRole);
+            box->setItemData(index, d.isDefault, kDeviceDefaultRole);
         }
         int idx = -1;
         if (!prevId.isEmpty())
@@ -188,10 +390,10 @@ void MainWindow::applySavedSelection(QComboBox* box, const QString& id, const QS
         idx = box->findData(id);
     if (idx < 0 && !name.isEmpty()) {
         for (int i = 0; i < box->count(); ++i) {
-            QString text = box->itemText(i);
-            if (text.endsWith(QStringLiteral("（默认）")))
-                text.chop(4);
-            if (text == name) {
+            const QString itemName = box->itemData(i, kDeviceNameRole).toString();
+            if (itemName == name || (box->itemData(i, kDeviceDefaultRole).toBool()
+                                     && (name == itemName + QStringLiteral(" (default)")
+                                         || name == itemName + QStringLiteral("\uFF08\u9ED8\u8BA4\uFF09")))) {
                 idx = i;
                 break;
             }
@@ -208,21 +410,48 @@ void MainWindow::startStopClicked()
         m_router->stop();
         return;
     }
-    cancelReconnect(); // 手动启动优先于待执行的自动重连
+    cancelReconnect(); // A manual start takes precedence over pending recovery.
+    m_lastError.clear();
     const QString srcId = m_source->currentData().toString();
     const QString tgtId = m_target->currentData().toString();
     if (srcId.isEmpty() || tgtId.isEmpty()) {
-        m_status->setText(
-            QStringLiteral("<span style='color:#c0392b;'>错误：没有可用的输出设备，请检查音频服务。</span>"));
+        m_status->setText(colorStatus(QStringLiteral("#c0392b"),
+                                       tr("Error: no output device is available. Check the audio service.")));
+        return;
+    }
+    if (srcId == tgtId) {
+        m_status->setText(colorStatus(
+            QStringLiteral("#c0392b"),
+            tr("The source and target must be different to prevent an audio feedback loop.")));
         return;
     }
     const float volume = m_volume->value() / 100.0f;
-    m_router->start(srcId, tgtId, volume); // 结果通过 started/errorOccurred 信号反馈
+    m_router->start(srcId, tgtId, volume); // Completion is reported by signals.
 }
 
 void MainWindow::onStarted()
 {
     m_running = true;
+    m_lastError.clear();
+
+    // Reflect the devices that the backend actually started. This keeps status
+    // text and persisted selections correct after an automatic reconnect.
+    const SessionDeviceIds ids = m_router ? m_router->lastSessionDeviceIds()
+                                          : SessionDeviceIds{};
+    if ((!ids.sourceId.isEmpty() && m_source->findData(ids.sourceId) < 0)
+        || (!ids.targetId.isEmpty() && m_target->findData(ids.targetId) < 0)) {
+        refreshDevices();
+    }
+    const auto selectDevice = [](QComboBox* box, const QString& id) {
+        if (!box || id.isEmpty())
+            return;
+        const int index = box->findData(id);
+        if (index >= 0)
+            box->setCurrentIndex(index);
+    };
+    selectDevice(m_source, ids.sourceId);
+    selectDevice(m_target, ids.targetId);
+
     cancelReconnect();
     updateUiState();
     saveSettings();
@@ -233,7 +462,7 @@ void MainWindow::onStopped(StopReason reason)
     const bool wasRunning = m_running;
     m_running = false;
 
-    // 只有设备/服务故障才自动重连；用户主动停止时清掉待重连状态。
+    // Only device/service failures trigger automatic reconnect.
     if (reason == StopReason::UserRequested) {
         cancelReconnect();
         if (wasRunning)
@@ -241,10 +470,15 @@ void MainWindow::onStopped(StopReason reason)
         return;
     }
 
-    // 记住故障发生时的设备，避免重连期间下拉框被刷新改写。
-    if (m_reconnectSourceId.isEmpty()) {
-        m_reconnectSourceId = m_source->currentData().toString();
-        m_reconnectTargetId = m_target->currentData().toString();
+    // Use the IDs captured by the backend for this session. The combo boxes
+    // may have been refreshed before this signal is delivered.
+    if (m_reconnectSourceId.isEmpty() || m_reconnectTargetId.isEmpty()) {
+        const SessionDeviceIds ids = m_router ? m_router->lastSessionDeviceIds()
+                                              : SessionDeviceIds{};
+        if (!ids.sourceId.isEmpty() && !ids.targetId.isEmpty()) {
+            m_reconnectSourceId = ids.sourceId;
+            m_reconnectTargetId = ids.targetId;
+        }
     }
     scheduleReconnect();
 }
@@ -259,21 +493,31 @@ void MainWindow::scheduleReconnect()
     if (m_reconnectAttempt >= kMaxReconnectAttempts) {
         cancelReconnect();
         updateUiState();
-        m_status->setText(QStringLiteral(
-            "<span style='color:#c0392b;'>设备已断开，多次重连失败，请检查设备后手动重试。</span>"));
+        m_status->setText(colorStatus(
+            QStringLiteral("#c0392b"),
+            tr("The device is disconnected. Automatic reconnect failed; check the device and try again.")));
         return;
     }
 
     const int delay = kReconnectDelaysMs[m_reconnectAttempt];
     ++m_reconnectAttempt;
+    m_reconnectDelayMs = delay;
     m_reconnectTimer->start(delay);
-    m_status->setText(QStringLiteral("<span style='color:#d35400;'>设备已断开，%1 秒后尝试重连"
-                                     "（第 %2/%3 次）…</span>")
-                          .arg(delay / 1000.0, 0, 'g', 2)
-                          .arg(m_reconnectAttempt)
-                          .arg(kMaxReconnectAttempts));
+    updateReconnectStatus();
     if (m_tray)
-        m_tray->setToolTip(QStringLiteral("音频监听转发 — 正在重连"));
+        m_tray->setToolTip(tr("AudioMonitor - Reconnecting"));
+}
+
+void MainWindow::updateReconnectStatus()
+{
+    if (!m_status || m_reconnectAttempt <= 0)
+        return;
+    m_status->setText(colorStatus(
+        QStringLiteral("#d35400"),
+        tr("Device disconnected; retrying in %1 seconds (attempt %2/%3)...")
+            .arg(m_reconnectDelayMs / 1000.0, 0, 'g', 2)
+            .arg(m_reconnectAttempt)
+            .arg(kMaxReconnectAttempts)));
 }
 
 void MainWindow::cancelReconnect()
@@ -281,6 +525,7 @@ void MainWindow::cancelReconnect()
     if (m_reconnectTimer)
         m_reconnectTimer->stop();
     m_reconnectAttempt = 0;
+    m_reconnectDelayMs = 0;
     m_reconnectSourceId.clear();
     m_reconnectTargetId.clear();
 }
@@ -290,7 +535,7 @@ void MainWindow::attemptReconnect()
     if (m_quitting || m_running)
         return;
 
-    // 设备可能换了 id（重新插入），先确认目标仍在当前设备列表里。
+    // Wait until both IDs captured from the failed session are present again.
     const QVector<DeviceInfo> devices = m_router->outputDevices();
     const auto hasDevice = [&devices](const QString& id) {
         for (const DeviceInfo& d : devices) {
@@ -300,21 +545,22 @@ void MainWindow::attemptReconnect()
         return false;
     };
     if (!hasDevice(m_reconnectSourceId) || !hasDevice(m_reconnectTargetId)) {
-        scheduleReconnect(); // 设备还没回来，继续退避等待
+        scheduleReconnect(); // Keep waiting until both devices are present.
         return;
     }
 
     const float volume = m_volume->value() / 100.0f;
     if (!m_router->start(m_reconnectSourceId, m_reconnectTargetId, volume))
-        scheduleReconnect(); // start() 失败会走 errorOccurred，这里只安排下一次
+        scheduleReconnect(); // start() reports the error; schedule the next attempt.
 }
 
 void MainWindow::onError(const QString& message)
 {
-    m_status->setText(QStringLiteral("<span style='color:#c0392b;'>错误：%1</span>")
-                          .arg(message.toHtmlEscaped()));
+    m_lastError = message;
+    m_status->setText(colorStatus(QStringLiteral("#c0392b"),
+                                  tr("Error: %1").arg(message.toHtmlEscaped())));
     if (m_tray)
-        m_tray->setToolTip(QStringLiteral("音频监听转发 — 出错"));
+        m_tray->setToolTip(tr("AudioMonitor - Error"));
 }
 
 void MainWindow::onVolumeChanged(int value)
@@ -331,36 +577,43 @@ void MainWindow::updateUiState()
     const QString tgtName = m_target->currentText();
 
     if (m_running) {
-        m_startStop->setText(QStringLiteral("停止监听"));
-        m_trayStartStop->setText(QStringLiteral("停止监听"));
+        m_startStop->setText(tr("Stop monitoring"));
+        m_trayStartStop->setText(tr("Stop monitoring"));
         m_source->setEnabled(false);
         m_target->setEnabled(false);
         m_refresh->setEnabled(false);
-        m_status->setText(QStringLiteral("<span style='color:#27ae60;'>● 正在监听：%1 → %2"
-                                         "（关闭窗口后仍在后台运行）</span>")
-                              .arg(srcName.toHtmlEscaped(), tgtName.toHtmlEscaped()));
+        m_status->setText(colorStatus(
+            QStringLiteral("#27ae60"),
+            tr("Monitoring: %1 -> %2 (continues in the background when the window is closed)")
+                .arg(srcName.toHtmlEscaped(), tgtName.toHtmlEscaped())));
         if (m_tray)
-            m_tray->setToolTip(
-                QStringLiteral("音频监听转发 — 运行中：%1 → %2").arg(srcName, tgtName));
+            m_tray->setToolTip(tr("AudioMonitor - Running: %1 -> %2").arg(srcName, tgtName));
     } else {
-        m_startStop->setText(QStringLiteral("开始监听"));
-        m_trayStartStop->setText(QStringLiteral("开始监听"));
+        m_startStop->setText(tr("Start monitoring"));
+        m_trayStartStop->setText(tr("Start monitoring"));
         m_source->setEnabled(true);
         m_target->setEnabled(true);
         m_refresh->setEnabled(true);
         const bool reconnectPending = m_reconnectTimer && m_reconnectTimer->isActive();
         if (reconnectPending) {
-            // 保留 scheduleReconnect() 写入的重连提示，不被设备刷新覆盖。
+            updateReconnectStatus();
+            if (m_tray)
+                m_tray->setToolTip(tr("AudioMonitor - Reconnecting"));
         } else if (m_source->count() == 0) {
-            m_status->setText(QStringLiteral(
-                "<span style='color:#c0392b;'>未找到输出设备。"
-                "请确认音频服务（Windows Audio / PulseAudio / PipeWire）正在运行，"
-                "然后点击「刷新设备」。</span>"));
-        } else if (!m_status->text().startsWith(QStringLiteral("<span style='color:#c0392b;'>错误"))) {
-            m_status->setText(QStringLiteral("<span style='color:#7f8c8d;'>已停止。选择设备后点击「开始监听」。</span>"));
+            m_status->setText(colorStatus(
+                QStringLiteral("#c0392b"),
+                tr("No output devices found. Make sure the audio service (Windows Audio or PipeWire) "
+                   "is running, then refresh the device list.")));
+        } else if (!m_lastError.isEmpty()) {
+            m_status->setText(colorStatus(
+                QStringLiteral("#c0392b"), tr("Error: %1").arg(m_lastError.toHtmlEscaped())));
+        } else {
+            m_status->setText(colorStatus(
+                QStringLiteral("#7f8c8d"),
+                tr("Stopped. Select devices and click Start monitoring.")));
         }
-        if (m_tray)
-            m_tray->setToolTip(QStringLiteral("音频监听转发 — 已停止"));
+        if (m_tray && !reconnectPending)
+            m_tray->setToolTip(tr("AudioMonitor - Stopped"));
     }
 }
 
@@ -383,8 +636,8 @@ void MainWindow::hideToTray()
     if (!m_trayMessageShown) {
         m_trayMessageShown = true;
         if (m_tray && QSystemTrayIcon::supportsMessages()) {
-            m_tray->showMessage(QStringLiteral("音频监听转发"),
-                                QStringLiteral("程序已最小化到系统托盘，监听在后台继续运行。"),
+            m_tray->showMessage(tr("AudioMonitor"),
+                                tr("The window was minimized to the system tray; monitoring continues in the background."),
                                 QSystemTrayIcon::Information, 3000);
         }
     }
@@ -402,7 +655,7 @@ void MainWindow::quitApp()
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
-    // 有托盘时关闭窗口 = 最小化到托盘继续后台运行；否则直接退出
+    // With a tray icon, closing the window keeps forwarding in the background.
     if (!m_quitting && QSystemTrayIcon::isSystemTrayAvailable()) {
         hideToTray();
         event->ignore();
@@ -432,12 +685,17 @@ void MainWindow::saveSettings()
 {
     QSettings s;
     s.setValue(QStringLiteral("volume"), m_volume->value());
+    const auto currentDeviceName = [](QComboBox* box) {
+        const int index = box ? box->currentIndex() : -1;
+        const QVariant nameData = index >= 0 ? box->itemData(index, kDeviceNameRole) : QVariant{};
+        return nameData.isValid() ? nameData.toString() : (box ? box->currentText() : QString{});
+    };
     if (!m_source->currentData().toString().isEmpty()) {
         s.setValue(QStringLiteral("source/id"), m_source->currentData());
-        s.setValue(QStringLiteral("source/name"), m_source->currentText());
+        s.setValue(QStringLiteral("source/name"), currentDeviceName(m_source));
     }
     if (!m_target->currentData().toString().isEmpty()) {
         s.setValue(QStringLiteral("target/id"), m_target->currentData());
-        s.setValue(QStringLiteral("target/name"), m_target->currentText());
+        s.setValue(QStringLiteral("target/name"), currentDeviceName(m_target));
     }
 }

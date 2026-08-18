@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -151,6 +152,98 @@ void testUpstreamDiscontinuity()
            "upstream discontinuity leaves no stale occupancy");
 }
 
+void testRepeatedDiscontinuities()
+{
+    RingBuffer ring(2, 1000, 4);
+    const std::array<float, 8> stale{ 1, 11, 2, 12, 3, 13, 4, 14 };
+    const std::array<float, 2> fresh{ 50, 60 };
+    std::array<float, 4> output{};
+
+    for (size_t generation = 1; generation <= 32; ++generation) {
+        expect(ring.write(stale.data(), 4) == 4,
+               "repeated-discontinuity setup succeeds");
+        expect(ring.write(stale.data(), 1) == 0,
+               "a full queue drops each repeated packet deterministically");
+        expect(ring.discontinuityGeneration() == generation,
+               "each repeated drop publishes one new generation");
+        output.fill(7.0f);
+        expect(ring.read(output.data(), 2, 1.0f) == 0,
+               "each new generation flushes stale audio exactly once");
+        expectSamples(output.data(), std::vector<float>(4, 0.0f),
+                      "repeated discontinuity flush is silence");
+        expect(ring.bufferedFrames() == 0,
+               "repeated discontinuity leaves the queue empty");
+
+        expect(ring.write(fresh.data(), 1) == 1,
+               "fresh audio is accepted after each flush");
+        output.fill(0.0f);
+        expect(ring.read(output.data(), 1, 1.0f) == 1,
+               "fresh audio is readable after each flush");
+        expectSamples(output.data(), { 50, 60 },
+                      "fresh audio is not confused with a prior generation");
+    }
+}
+
+void testLongWraparoundSequence()
+{
+    RingBuffer ring(2, 1000, 5);
+    std::array<float, 10> input{};
+    std::array<float, 10> output{};
+    int nextValue = 0;
+
+    // Repeatedly cross the physical storage boundary while keeping the queue
+    // below capacity. This exercises both split memcpy paths over many cycles.
+    for (int cycle = 0; cycle < 200; ++cycle) {
+        const size_t firstFrames = static_cast<size_t>((cycle % 4) + 1);
+        for (size_t frame = 0; frame < firstFrames; ++frame) {
+            input[frame * 2] = static_cast<float>(nextValue);
+            input[frame * 2 + 1] = -static_cast<float>(nextValue);
+            ++nextValue;
+        }
+        expect(ring.write(input.data(), firstFrames) == firstFrames,
+               "long wraparound producer write succeeds");
+        expect(ring.read(output.data(), firstFrames, 1.0f) == firstFrames,
+               "long wraparound consumer read succeeds");
+        int expected = nextValue - static_cast<int>(firstFrames);
+        for (size_t frame = 0; frame < firstFrames; ++frame, ++expected) {
+            expect(output[frame * 2] == static_cast<float>(expected)
+                       && output[frame * 2 + 1] == -static_cast<float>(expected),
+                   "long wraparound preserves frame order");
+        }
+    }
+    expect(ring.discontinuityGeneration() == 0,
+           "wraparound without overflow does not report discontinuities");
+    expect(ring.bufferedFrames() == 0,
+           "long wraparound sequence drains completely");
+}
+
+void testInvalidConfiguration()
+{
+    bool threw = false;
+    try {
+        RingBuffer invalid(0, 48000, 50);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    expect(threw, "zero-channel queues are rejected");
+
+    threw = false;
+    try {
+        RingBuffer invalid(2, 0, 50);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    expect(threw, "zero-rate queues are rejected");
+
+    threw = false;
+    try {
+        RingBuffer invalid(2, 48000, 0);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    expect(threw, "zero-duration queues are rejected");
+}
+
 void testActualSampleRateSizing()
 {
     RingBuffer at44100(2, 44100, 50);
@@ -257,6 +350,9 @@ int main()
     testPartialWriteIsFrameAligned();
     testOverflowAndConsumerStaleFlush();
     testUpstreamDiscontinuity();
+    testRepeatedDiscontinuities();
+    testLongWraparoundSequence();
+    testInvalidConfiguration();
     testActualSampleRateSizing();
     testVolumeAndSilenceWrite();
     testRepeatedProducerConsumerProgress();

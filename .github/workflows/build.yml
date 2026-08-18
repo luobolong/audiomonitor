@@ -16,7 +16,8 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build pkg-config qt6-base-dev libpipewire-0.3-dev
+          sudo apt-get install -y build-essential cmake ninja-build pkg-config \
+            qt6-base-dev qt6-tools-dev qt6-l10n-tools libpipewire-0.3-dev
       - name: Configure
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
       - name: Build

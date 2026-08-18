@@ -5,352 +5,121 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      version:
+        description: Package version, without a leading v
+        required: true
+        default: '1.0.0'
+        type: string
 
 env:
-  APP_VERSION: ${{ github.ref_name }}
+  APP_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
 
 jobs:
-  build-linux-binary:
+  build-linux:
+    name: Build and package Linux binaries
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Validate package version
+        run: |
+          VERSION="${APP_VERSION#v}"
+          if [[ ! "$VERSION" =~ ^[0-9]+([.][0-9]+){2}$ ]]; then
+            echo "Package version must use numeric X.Y.Z form: $VERSION" >&2
+            exit 2
+          fi
+
+      - name: Install build and package dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build pkg-config qt6-base-dev libpipewire-0.3-dev
+          sudo apt-get install -y \
+            build-essential cmake ninja-build pkg-config \
+            qt6-base-dev qt6-tools-dev qt6-l10n-tools \
+            libpipewire-0.3-dev dpkg-dev rpm imagemagick
 
       - name: Configure
-        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+        run: cmake -S . -B build -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX=/usr
 
       - name: Build
-        run: cmake --build build
+        run: cmake --build build --parallel
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
-      - name: Install to staging directory
-        run: DESTDIR=$PWD/install-root cmake --install build
+      - name: Build Debian, RPM, and tar.gz packages
+        run: |
+          mkdir -p release-output
+          packaging/package-linux.sh "${APP_VERSION}" build release-output all
 
-      - name: Upload build artifacts
+      - name: Inspect binary package metadata
+        run: |
+          dpkg-deb --info release-output/*.deb
+          rpm -qip release-output/*.rpm
+          tar -tzf release-output/*.tar.gz >/dev/null
+
+      - name: Stage files for AppImage and package inspection
+        run: |
+          packaging/stage-linux.sh build install-root /usr
+          test -f install-root/usr/share/audiomonitor/translations/audiomonitor_en.qm
+          test -f install-root/usr/share/audiomonitor/translations/audiomonitor_zh_CN.qm
+
+      - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: linux-binary
+          name: linux-package
           path: |
-            build/audiomonitor
-            install-root/
-
-  package-deb:
-    needs: build-linux-binary
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: linux-binary
-
-      - name: Install packaging tools
-        run: sudo apt-get update && sudo apt-get install -y dpkg-dev
-
-      - name: Create Debian package structure
-        run: |
-          VERSION="${APP_VERSION#v}"
-          PACKAGE_NAME="audiomonitor_${VERSION}_amd64"
-
-          mkdir -p "$PACKAGE_NAME/DEBIAN"
-          mkdir -p "$PACKAGE_NAME/usr/bin"
-          mkdir -p "$PACKAGE_NAME/usr/share/applications"
-          mkdir -p "$PACKAGE_NAME/usr/share/icons/hicolor/256x256/apps"
-          mkdir -p "$PACKAGE_NAME/usr/share/doc/audiomonitor"
-
-          # Copy binary
-          cp build/audiomonitor "$PACKAGE_NAME/usr/bin/"
-          chmod 755 "$PACKAGE_NAME/usr/bin/audiomonitor"
-
-          # Create desktop entry
-          cat > "$PACKAGE_NAME/usr/share/applications/audiomonitor.desktop" << 'EOF'
-          [Desktop Entry]
-          Type=Application
-          Name=AudioMonitor
-          GenericName=Audio Forwarding Tool
-          Comment=Forward audio output from one device to another
-          Exec=audiomonitor
-          Icon=audiomonitor
-          Terminal=false
-          Categories=AudioVideo;Audio;
-          Keywords=audio;monitor;forwarding;
-          EOF
-
-          # Copy documentation
-          cp README.md "$PACKAGE_NAME/usr/share/doc/audiomonitor/"
-          cp LICENSE "$PACKAGE_NAME/usr/share/doc/audiomonitor/"
-
-          # Create control file
-          cat > "$PACKAGE_NAME/DEBIAN/control" << EOF
-          Package: audiomonitor
-          Version: ${VERSION}
-          Section: sound
-          Priority: optional
-          Architecture: amd64
-          Depends: libqt6core6t64 (>= 6.2), libqt6gui6 (>= 6.2), libqt6widgets6 (>= 6.2), libpipewire-0.3-0t64, libc6 (>= 2.38)
-          Maintainer: luobolong
-          Description: Audio monitoring and forwarding tool
-           AudioMonitor forwards audio output from one device to another in real-time.
-           On Linux it uses a native PipeWire filter node to route a selected sink's
-           monitor signal to a different output sink.
-           .
-           Features:
-            - GUI for device selection and volume control (0% - 200%)
-            - System tray support for background operation
-            - Automatic device hotplug detection
-            - Settings persistence
-            - PipeWire graph-integrated monitoring without an application PCM queue
-          Homepage: https://github.com/luobolong/audiomonitor
-          EOF
-
-          # Build package
-          dpkg-deb --build --root-owner-group "$PACKAGE_NAME"
-
-          echo "DEB_PACKAGE=$PACKAGE_NAME.deb" >> $GITHUB_ENV
-
-      - name: Upload DEB package
-        uses: actions/upload-artifact@v4
-        with:
-          name: deb-package
-          path: "*.deb"
-
-  package-rpm:
-    needs: build-linux-binary
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: linux-binary
-
-      - name: Install RPM build tools
-        run: sudo apt-get update && sudo apt-get install -y rpm
-
-      - name: Create RPM package
-        run: |
-          VERSION="${APP_VERSION#v}"
-
-          mkdir -p ~/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
-          mkdir -p ~/rpmbuild/BUILDROOT/audiomonitor-${VERSION}-1.x86_64/usr/bin
-          mkdir -p ~/rpmbuild/BUILDROOT/audiomonitor-${VERSION}-1.x86_64/usr/share/applications
-          mkdir -p ~/rpmbuild/BUILDROOT/audiomonitor-${VERSION}-1.x86_64/usr/share/doc/audiomonitor
-
-          # Copy files
-          cp build/audiomonitor ~/rpmbuild/BUILDROOT/audiomonitor-${VERSION}-1.x86_64/usr/bin/
-          chmod 755 ~/rpmbuild/BUILDROOT/audiomonitor-${VERSION}-1.x86_64/usr/bin/audiomonitor
-
-          # Desktop entry
-          cat > ~/rpmbuild/BUILDROOT/audiomonitor-${VERSION}-1.x86_64/usr/share/applications/audiomonitor.desktop << 'EOF'
-          [Desktop Entry]
-          Type=Application
-          Name=AudioMonitor
-          GenericName=Audio Forwarding Tool
-          Comment=Forward audio output from one device to another
-          Exec=audiomonitor
-          Icon=audiomonitor
-          Terminal=false
-          Categories=AudioVideo;Audio;
-          Keywords=audio;monitor;forwarding;
-          EOF
-
-          cp README.md ~/rpmbuild/BUILDROOT/audiomonitor-${VERSION}-1.x86_64/usr/share/doc/audiomonitor/
-          cp LICENSE ~/rpmbuild/BUILDROOT/audiomonitor-${VERSION}-1.x86_64/usr/share/doc/audiomonitor/
-
-          # Create spec file
-          cat > ~/rpmbuild/SPECS/audiomonitor.spec << EOF
-          Name:           audiomonitor
-          Version:        ${VERSION}
-          Release:        1%{?dist}
-          Summary:        Audio monitoring and forwarding tool
-
-          License:        MIT
-          URL:            https://github.com/luobolong/audiomonitor
-
-          Requires:       qt6-qtbase >= 6.2, pipewire-libs
-
-          %description
-          AudioMonitor forwards audio output from one device to another in real-time.
-          On Linux it uses a native PipeWire filter node to route a selected sink's
-          monitor signal to a different output sink.
-
-          Features:
-          - GUI for device selection and volume control (0%% - 200%%)
-          - System tray support for background operation
-          - Automatic device hotplug detection
-          - Settings persistence
-          - PipeWire graph-integrated monitoring without an application PCM queue
-
-          %files
-          %license /usr/share/doc/audiomonitor/LICENSE
-          %doc /usr/share/doc/audiomonitor/README.md
-          /usr/bin/audiomonitor
-          /usr/share/applications/audiomonitor.desktop
-
-          %changelog
-          * $(date '+%a %b %d %Y') luobolong <luobolong@users.noreply.github.com> - ${VERSION}-1
-          - Release version ${VERSION}
-          EOF
-
-          # Build RPM
-          rpmbuild --target x86_64 -bb ~/rpmbuild/SPECS/audiomonitor.spec
-
-          # Copy to workspace
-          cp ~/rpmbuild/RPMS/x86_64/*.rpm .
-
-      - name: Upload RPM package
-        uses: actions/upload-artifact@v4
-        with:
-          name: rpm-package
-          path: "*.rpm"
-
-  package-tarball:
-    needs: build-linux-binary
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: linux-binary
-
-      - name: Create tarball package
-        run: |
-          VERSION="${APP_VERSION#v}"
-          PACKAGE_DIR="audiomonitor-${VERSION}-linux-x86_64"
-
-          mkdir -p "$PACKAGE_DIR/bin"
-          mkdir -p "$PACKAGE_DIR/share/applications"
-          mkdir -p "$PACKAGE_DIR/share/doc"
-
-          # Copy binary
-          cp build/audiomonitor "$PACKAGE_DIR/bin/"
-          chmod 755 "$PACKAGE_DIR/bin/audiomonitor"
-
-          # Desktop entry
-          cat > "$PACKAGE_DIR/share/applications/audiomonitor.desktop" << 'EOF'
-          [Desktop Entry]
-          Type=Application
-          Name=AudioMonitor
-          GenericName=Audio Forwarding Tool
-          Comment=Forward audio output from one device to another
-          Exec=audiomonitor
-          Icon=audiomonitor
-          Terminal=false
-          Categories=AudioVideo;Audio;
-          Keywords=audio;monitor;forwarding;
-          EOF
-
-          # Documentation
-          cp README.md LICENSE "$PACKAGE_DIR/share/doc/"
-
-          # Install script
-          cat > "$PACKAGE_DIR/install.sh" << 'EOF'
-          #!/bin/bash
-          set -e
-
-          if [ "$EUID" -ne 0 ]; then
-            echo "Please run as root or with sudo"
-            exit 1
-          fi
-
-          PREFIX="${1:-/usr/local}"
-
-          echo "Installing audiomonitor to $PREFIX..."
-          install -Dm755 bin/audiomonitor "$PREFIX/bin/audiomonitor"
-          install -Dm644 share/applications/audiomonitor.desktop "$PREFIX/share/applications/audiomonitor.desktop"
-          install -Dm644 share/doc/README.md "$PREFIX/share/doc/audiomonitor/README.md"
-          install -Dm644 share/doc/LICENSE "$PREFIX/share/doc/audiomonitor/LICENSE"
-
-          echo "Installation complete!"
-          echo "Run: audiomonitor"
-          EOF
-          chmod +x "$PACKAGE_DIR/install.sh"
-
-          # Create README
-          cat > "$PACKAGE_DIR/README.txt" << 'EOF'
-          AudioMonitor - Generic Linux Package
-          =====================================
-
-          Installation:
-            sudo ./install.sh           # Install to /usr/local
-            sudo ./install.sh /usr      # Install to /usr
-
-          Manual installation:
-            cp bin/audiomonitor ~/.local/bin/  # User-local installation
-
-          Dependencies:
-            - Qt 6.2+ (Ubuntu 24.04: libqt6core6t64, libqt6gui6, libqt6widgets6)
-            - PipeWire client library (libpipewire-0.3.so.0)
-            - A running PipeWire audio graph and session manager
-
-          Run:
-            audiomonitor
-          EOF
-
-          # Create tarball
-          tar czf "${PACKAGE_DIR}.tar.gz" "$PACKAGE_DIR"
-
-          echo "TARBALL=${PACKAGE_DIR}.tar.gz" >> $GITHUB_ENV
-
-      - name: Upload tarball
-        uses: actions/upload-artifact@v4
-        with:
-          name: tarball-package
-          path: "*.tar.gz"
+            release-output/*
+            install-root/**
 
   package-appimage:
-    needs: build-linux-binary
+    name: Build AppImage
+    needs: build-linux
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download build artifacts
+      - name: Download staged install tree
         uses: actions/download-artifact@v4
         with:
-          name: linux-binary
+          name: linux-package
+          path: downloaded
 
-      - name: Install AppImage tools
+      - name: Install AppImage build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qt6-base-dev libpipewire-0.3-dev imagemagick wget
+
+      - name: Download linuxdeploy and Qt plugin
         run: |
           wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
           wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
           chmod +x linuxdeploy*.AppImage
 
-      - name: Install Qt for AppImage bundling
-        run: sudo apt-get update && sudo apt-get install -y qt6-base-dev libpipewire-0.3-0t64
-
       - name: Create AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: '1'
         run: |
           VERSION="${APP_VERSION#v}"
+          export VERSION
+          mkdir -p AppDir
+          cp -a downloaded/install-root/usr AppDir/
 
-          mkdir -p AppDir/usr/bin
-          mkdir -p AppDir/usr/share/applications
-          mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
-
-          cp build/audiomonitor AppDir/usr/bin/
-
-          cp packaging/audiomonitor.desktop AppDir/usr/share/applications/
-          bash packaging/create-icon.sh AppDir/usr/share/icons/hicolor/256x256/apps
-
-          # Set environment for linuxdeploy
-          export QMAKE=/usr/lib/qt6/bin/qmake
-          export VERSION="${VERSION}"
-          export APPIMAGE_EXTRACT_AND_RUN=1
-
-          # Run linuxdeploy with Qt plugin
+          QMAKE_PATH="$(command -v qmake6 || command -v qmake || true)"
+          if [[ -z "$QMAKE_PATH" ]]; then
+            QMAKE_PATH="$(find /usr/lib /usr/libexec -type f \
+              -path '*/qt6/bin/qmake*' -print -quit 2>/dev/null || true)"
+          fi
+          test -x "$QMAKE_PATH"
+          export QMAKE="$QMAKE_PATH"
           ./linuxdeploy-x86_64.AppImage --appimage-extract-and-run \
-            --appdir AppDir --plugin qt --output appimage
+            --appdir AppDir \
+            --plugin qt \
+            --exclude-library 'libpipewire-0.3.so.0' \
+            --output appimage
 
-          # Rename AppImage to consistent name
           mapfile -t appimages < <(find . -maxdepth 1 -type f -name '*.AppImage' \
             ! -name 'linuxdeploy*.AppImage')
           test "${#appimages[@]}" -eq 1
@@ -363,134 +132,65 @@ jobs:
           path: audiomonitor-*-x86_64.AppImage
 
   package-arch:
-    needs: build-linux-binary
+    name: Build Arch package
+    needs: build-linux
     runs-on: ubuntu-24.04
     container: archlinux:latest
     steps:
-      - name: Install base tools
-        run: |
-          pacman -Syu --noconfirm
-          pacman -S --noconfirm base-devel git
-
       - uses: actions/checkout@v4
 
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: linux-binary
+      - name: Install Arch build dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm base-devel git cmake ninja pkgconf qt6-base qt6-tools pipewire
 
-      - name: Create PKGBUILD
+      - name: Build package with makepkg
         run: |
           VERSION="${APP_VERSION#v}"
+          mkdir -p arch-build release-output
+          cp packaging/PKGBUILD arch-build/PKGBUILD
+          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" arch-build/PKGBUILD
 
-          mkdir -p arch-package
-          cd arch-package
+          # Manual runs may package a branch without a corresponding tag.
+          # Feed makepkg a local source archive while leaving the published
+          # PKGBUILD in its normal tag-based form.
+          if [[ "${GITHUB_REF_TYPE}" != tag ]]; then
+            SOURCE_ARCHIVE="audiomonitor-${VERSION}.tar.gz"
+            git archive --format=tar.gz --prefix="audiomonitor-${VERSION}/" \
+              --output="arch-build/${SOURCE_ARCHIVE}" HEAD
+            SOURCE_SHA256=$(sha256sum "arch-build/${SOURCE_ARCHIVE}" | cut -d' ' -f1)
+            sed -i "s|^source=.*|source=(\"${SOURCE_ARCHIVE}\")|" arch-build/PKGBUILD
+            sed -i "s|^sha256sums=.*|sha256sums=('${SOURCE_SHA256}')|" arch-build/PKGBUILD
+          fi
 
-          cat > PKGBUILD << 'PKGBUILD_END'
-          # Maintainer: luobolong
-          pkgname=audiomonitor
-          pkgver=VERSION_PLACEHOLDER
-          pkgrel=1
-          pkgdesc="Audio monitoring and forwarding tool using native PipeWire"
-          arch=('x86_64')
-          url="https://github.com/luobolong/audiomonitor"
-          license=('MIT')
-          depends=('qt6-base' 'pipewire')
-          makedepends=('cmake' 'ninja' 'pkgconf')
-          source=("audiomonitor-${pkgver}.tar.gz::https://github.com/luobolong/audiomonitor/archive/v${pkgver}.tar.gz")
-          sha256sums=('SKIP')
+          cp packaging/PKGBUILD release-output/PKGBUILD
+          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" release-output/PKGBUILD
+          useradd --create-home builder
+          chown -R builder:builder arch-build
+          (cd arch-build && runuser -u builder -- makepkg --cleanbuild --nodeps --noconfirm)
+          cp arch-build/audiomonitor-*.pkg.tar.zst release-output/
+          pacman -Qip release-output/*.pkg.tar.zst
 
-          build() {
-            cd "$srcdir/audiomonitor-$pkgver"
-            cmake -B build -G Ninja \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DCMAKE_INSTALL_PREFIX=/usr
-            cmake --build build
-          }
-
-          package() {
-            cd "$srcdir/audiomonitor-$pkgver"
-            DESTDIR="$pkgdir" cmake --install build
-
-            # Desktop entry
-            install -Dm644 /dev/stdin "$pkgdir/usr/share/applications/audiomonitor.desktop" << 'EOF'
-          [Desktop Entry]
-          Type=Application
-          Name=AudioMonitor
-          GenericName=Audio Forwarding Tool
-          Comment=Forward audio output from one device to another
-          Exec=audiomonitor
-          Icon=audiomonitor
-          Terminal=false
-          Categories=AudioVideo;Audio;
-          Keywords=audio;monitor;forwarding;
-          EOF
-
-            # License
-            install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
-          }
-          PKGBUILD_END
-
-          # Replace version placeholder
-          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/" PKGBUILD
-
-          # For CI purposes, we'll create a pre-built package structure
-          mkdir -p pkg/usr/bin
-          mkdir -p pkg/usr/share/applications
-          mkdir -p pkg/usr/share/licenses/audiomonitor
-
-          cp ../build/audiomonitor pkg/usr/bin/
-          chmod 755 pkg/usr/bin/audiomonitor
-
-          cat > pkg/usr/share/applications/audiomonitor.desktop << 'EOF'
-          [Desktop Entry]
-          Type=Application
-          Name=AudioMonitor
-          GenericName=Audio Forwarding Tool
-          Comment=Forward audio output from one device to another
-          Exec=audiomonitor
-          Icon=audiomonitor
-          Terminal=false
-          Categories=AudioVideo;Audio;
-          Keywords=audio;monitor;forwarding;
-          EOF
-
-          cp ../LICENSE pkg/usr/share/licenses/audiomonitor/
-
-          # Create .PKGINFO
-          cat > pkg/.PKGINFO << EOF
-          pkgname = audiomonitor
-          pkgver = ${VERSION}-1
-          pkgdesc = Audio monitoring and forwarding tool using native PipeWire
-          url = https://github.com/luobolong/audiomonitor
-          builddate = $(date +%s)
-          packager = luobolong
-          size = $(du -sb pkg | cut -f1)
-          arch = x86_64
-          license = MIT
-          depend = qt6-base
-          depend = pipewire
-          EOF
-
-          # Create package
-          cd pkg
-          env LANG=C bsdtar -czf ../"audiomonitor-${VERSION}-1-x86_64.pkg.tar.zst" .PKGINFO *
-          cd ..
-
-          # Copy files back
-          cp PKGBUILD ../
-          cp *.pkg.tar.zst ../
-
-      - name: Upload Arch package
+      - name: Upload Arch artifacts
         uses: actions/upload-artifact@v4
         with:
           name: arch-package
-          path: |
-            PKGBUILD
-            *.pkg.tar.zst
+          path: release-output/*
+
+  check-nix:
+    name: Check Nix package
+    needs: build-linux
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - name: Build Nix package
+        run: nix build .#audiomonitor --no-link
 
   create-release:
-    needs: [build-linux-binary, package-deb, package-rpm, package-tarball, package-appimage, package-arch]
+    name: Publish release assets
+    needs: [build-linux, package-appimage, package-arch, check-nix]
     runs-on: ubuntu-24.04
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
@@ -498,20 +198,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all artifacts
+      - name: Download Linux package artifacts
         uses: actions/download-artifact@v4
+        with:
+          pattern: '*-package'
+          path: downloaded-packages
+          merge-multiple: true
 
-      - name: Prepare release assets
+      - name: Prepare release assets and checksums
         run: |
           mkdir -p release-assets
-          find . -name "*.deb" -exec cp {} release-assets/ \;
-          find . -name "*.rpm" -exec cp {} release-assets/ \;
-          find . -name "*.tar.gz" -exec cp {} release-assets/ \;
-          find . -name "*.AppImage" -exec cp {} release-assets/ \;
-          find . -name "*.pkg.tar.zst" -exec cp {} release-assets/ \;
-          find . -name "PKGBUILD" -exec cp {} release-assets/ \;
-
-          ls -lh release-assets/
+          find downloaded-packages -type f \( \
+            -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' \
+            -o -name '*.AppImage' -o -name '*.pkg.tar.zst' -o -name 'PKGBUILD' \
+          \) -exec cp {} release-assets/ \;
+          (cd release-assets && sha256sum * > SHA256SUMS)
+          ls -lh release-assets
 
       - name: Generate release notes
         run: |
@@ -519,65 +221,22 @@ jobs:
           cat > release-notes.md << EOF
           # AudioMonitor ${VERSION}
 
-          ## Linux Packages
+          Linux assets include Debian (.deb), RPM (.rpm), generic binary (.tar.gz),
+          AppImage, and Arch Linux (.pkg.tar.zst plus PKGBUILD) packages.
 
-          ### Debian/Ubuntu (.deb)
-          \`\`\`bash
-          sudo dpkg -i audiomonitor_${VERSION}_amd64.deb
-          sudo apt-get install -f  # Install dependencies if needed
-          \`\`\`
+          All Linux packages require a running PipeWire graph and session manager.
+          The AppImage bundles Qt but intentionally uses the host PipeWire client.
+          Nix users can build directly with:
 
-          ### Fedora/RHEL (.rpm)
-          \`\`\`bash
-          sudo dnf install audiomonitor-${VERSION}-1.x86_64.rpm
-          # or
-          sudo rpm -ivh audiomonitor-${VERSION}-1.x86_64.rpm
-          \`\`\`
-
-          ### Generic Linux (.tar.gz)
-          \`\`\`bash
-          tar xzf audiomonitor-${VERSION}-linux-x86_64.tar.gz
-          cd audiomonitor-${VERSION}-linux-x86_64
-          sudo ./install.sh
-          \`\`\`
-
-          ### AppImage (Portable)
-          \`\`\`bash
-          chmod +x audiomonitor-${VERSION}-x86_64.AppImage
-          ./audiomonitor-${VERSION}-x86_64.AppImage
-          \`\`\`
-
-          ### Arch Linux
-          \`\`\`bash
-          sudo pacman -U audiomonitor-${VERSION}-1-x86_64.pkg.tar.zst
-          \`\`\`
-
-          Or use the PKGBUILD to build from source:
-          \`\`\`bash
-          makepkg -si
-          \`\`\`
-
-          ### NixOS / Nix
-          \`\`\`bash
+          \`\`\`sh
           nix build github:luobolong/audiomonitor/${APP_VERSION}
-          # or
-          nix run github:luobolong/audiomonitor/${APP_VERSION}
           \`\`\`
 
-          ## Dependencies
-          - Qt 6.2+
-          - Native PipeWire client library and a running PipeWire audio graph
-
-          ## Features
-          - Real-time audio forwarding between output devices
-          - GUI with device selection and volume control (0% - 200%)
-          - System tray support
-          - Direct PipeWire filter routing without an application PCM queue
-          - Automatic device hotplug detection
+          Verify downloaded assets with the accompanying SHA256SUMS file.
           EOF
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           body_path: release-notes.md
           files: release-assets/*

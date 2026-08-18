@@ -1,193 +1,95 @@
-# Linux Packaging Guide
+# Linux Packaging
 
-This document describes the automated Linux packaging system for AudioMonitor.
+Linux release packaging is driven by `.github/workflows/release.yml`. The
+workflow builds and tests one Ubuntu 24.04 CMake tree, stages the install tree
+once, and reuses it for the binary package formats. The Arch job builds the
+repository `packaging/PKGBUILD` with `makepkg` in an Arch container so the
+resulting package has a native `.pkg.tar.zst` index.
 
-## Overview
+## Release artifacts
 
-The project uses two separate GitHub Actions workflows:
+Numeric `vX.Y.Z` tags publish:
 
-1. **`build.yml`** - Continuous integration build that runs on every push/PR
-   - Builds for Linux (Ubuntu) and Windows
-   - Uploads basic build artifacts
-   - Fast feedback for development
+- `audiomonitor_<version>_amd64.deb` for Debian-family systems.
+- `audiomonitor-<version>-1.x86_64.rpm` for RPM-family systems.
+- `audiomonitor-<version>-linux-x86_64.tar.gz` for manual installation.
+- `audiomonitor-<version>-x86_64.AppImage` with Qt bundled by linuxdeploy.
+- `audiomonitor-<version>-1-x86_64.pkg.tar.zst` and the matching `PKGBUILD`.
+- `SHA256SUMS` for the published files.
 
-2. **`release.yml`** - Release packaging that runs on Git tags
-   - Creates distribution-specific packages
-   - Uploads to GitHub Releases
-   - Generates release notes
+Manual workflow runs require an explicit numeric `X.Y.Z` package version.
+For those runs, the Arch job packages the checked-out ref through a local
+source archive; tagged releases validate the checked-in tag-based `PKGBUILD`.
 
-## Triggering a Release
+Nix is source-based rather than a release asset. The flake and classic
+`default.nix` expression are checked in CI and can be built with:
 
-To create a new release with all packaging formats:
-
-```bash
-# Tag the release
-git tag -a v1.0.1 -m "Release version 1.0.1"
-git push origin v1.0.1
+```sh
+nix build .#audiomonitor
+# or
+nix-build -E 'with import <nixpkgs> {}; callPackage ./default.nix {}'
 ```
 
-This will automatically:
-1. Build the application from source
-2. Create packages for all supported distributions
-3. Upload them as GitHub Release assets
+## Package dependencies
 
-## Package Formats
+The Debian package derives shared-library dependencies with
+`dpkg-shlibdeps` when available. The RPM declares `qt6-qtbase` and
+`pipewire-libs` and also uses RPM's automatic ELF dependency generator. The
+Arch recipe declares `qt6-base` and `pipewire`. All Linux packages require a
+running PipeWire graph and session manager; installing a package does not
+provide an audio server.
 
-### Debian/Ubuntu (.deb)
-- **Target**: Debian, Ubuntu, Linux Mint, Pop!_OS, Elementary OS
-- **Structure**: Standard Debian package with control file
-- **Dependencies**: Declared via `Depends:` field
-- **Installation**: `sudo dpkg -i audiomonitor_*.deb && sudo apt-get install -f`
+The AppImage bundles Qt and the application resources but deliberately leaves
+the PipeWire client library to the host. This keeps it compatible with the
+host's PipeWire graph and session manager. A system with FUSE support or
+`APPIMAGE_EXTRACT_AND_RUN=1` is required to run it.
 
-### Fedora/RHEL (.rpm)
-- **Target**: Fedora, RHEL, CentOS, Rocky Linux, AlmaLinux
-- **Structure**: RPM package built from spec file
-- **Dependencies**: Declared via `Requires:` field
-- **Installation**: `sudo dnf install audiomonitor-*.rpm`
+Qt translation catalogs are compiled from `translations/audiomonitor_en.ts`
+and `translations/audiomonitor_zh_CN.ts` by CMake. Qt Linguist tools are a
+required build dependency, and the catalogs are embedded in the application.
+The staging script also copies the generated `.qm` files into
+`/usr/share/audiomonitor/translations` for package inspection.
 
-### Generic Linux (.tar.gz)
-- **Target**: Any Linux distribution
-- **Structure**: Simple directory archive with install script
-- **Dependencies**: User must install manually
-- **Installation**: `sudo ./install.sh` (installs to /usr/local by default)
+## Local package builds
 
-### AppImage (.AppImage)
-- **Target**: Any Linux distribution with FUSE
-- **Structure**: Portable bundle containing the application and selected user-space libraries
-- **Dependencies**: A running host PipeWire graph/session manager is still required
-- **Installation**: `chmod +x audiomonitor-*.AppImage && ./audiomonitor-*.AppImage`
+Build and test the application first:
 
-### Arch Linux (.pkg.tar.zst + PKGBUILD)
-- **Target**: Arch Linux, Manjaro, EndeavourOS
-- **Structure**: Arch package + PKGBUILD for AUR
-- **Dependencies**: Declared in PKGBUILD
-- **Installation**: `sudo pacman -U audiomonitor-*.pkg.tar.zst`
+Install CMake, Ninja, a C++17 compiler, Qt 6 Widgets and Linguist tools,
+`pkg-config`, and the PipeWire 0.3 development package using your
+distribution's package manager.
 
-### NixOS (Flake)
-- **Target**: NixOS, Nix users on any distro
-- **Structure**: Nix expression (already in repo: `flake.nix`, `default.nix`)
-- **Dependencies**: Declared in Nix expression
-- **Installation**: `nix build github:luobolong/audiomonitor/v1.0.0`
-
-## Package Contents
-
-All packages include:
-- Binary: `audiomonitor` (compiled with Qt6 and native `libpipewire-0.3` support)
-- Desktop entry: `/usr/share/applications/audiomonitor.desktop`
-- Documentation: README.md, LICENSE
-
-## Reproducible Builds
-
-The workflow follows these principles for reproducibility:
-
-1. **Separation of Concerns**: 
-   - Build stage compiles the binary once
-   - Packaging stages consume the same binary artifact
-   - No recompilation per package format
-
-2. **Explicit Dependencies**:
-   - Qt 6.2+ (Core, Gui, Widgets)
-   - Native PipeWire client library (`libpipewire-0.3`)
-   - System libraries (libc6, libstdc++)
-
-3. **Consistent Environment**:
-   - Ubuntu 24.04 for build and Debian-package metadata
-   - Container for Arch package
-   - Fixed tool versions where possible
-
-## Customizing Packages
-
-### Updating Version Number
-
-Version is automatically extracted from the Git tag (`v1.0.0` → `1.0.0`).
-
-### Changing Dependencies
-
-Edit the dependency declarations in `release.yml`:
-
-- **DEB**: `Depends:` field in control file
-- **RPM**: `Requires:` field in spec file
-- **Arch**: `depends=()` array in PKGBUILD
-- **Nix**: `buildInputs` in `default.nix`
-
-### Adding Desktop Integration
-
-Desktop files, icons, and metadata are defined in each packaging job.
-To update, edit `packaging/audiomonitor.desktop` and
-`packaging/create-icon.sh`; the release workflow consumes those files.
-
-## Testing Packages Locally
-
-### Test DEB package:
-```bash
-docker run --rm -v $PWD:/work -w /work ubuntu:latest bash -c \
-  "apt-get update && apt-get install -y ./audiomonitor_*.deb"
-```
-
-### Test RPM package:
-```bash
-docker run --rm -v $PWD:/work -w /work fedora:latest bash -c \
-  "dnf install -y ./audiomonitor-*.rpm"
-```
-
-### Test Arch package:
-```bash
-docker run --rm -v $PWD:/work -w /work archlinux:latest bash -c \
-  "pacman -Syu --noconfirm && pacman -U --noconfirm ./audiomonitor-*.pkg.tar.zst"
-```
-
-### Test AppImage:
-```bash
-chmod +x audiomonitor-*.AppImage
-./audiomonitor-*.AppImage --smoke-test 500
-```
-
-Package installation and process-start checks do not validate live device
-routing. A routing test additionally needs two distinct PipeWire sinks with
-monitor/input ports and a running session manager.
-
-## Manual Release Process
-
-If you need to create packages manually:
-
-```bash
-# 1. Build the application
-cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+```sh
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=/usr
 cmake --build build
-DESTDIR=$PWD/install-root cmake --install build
-
-# 2. Create DEB package
-# ... (follow steps in release.yml)
-
-# 3. Create RPM package
-# ... (follow steps in release.yml)
+ctest --test-dir build --output-on-failure
 ```
 
-## Troubleshooting
+Then create Debian, RPM, and tarball packages with the shared script:
 
-### AppImage fails to build
-- AppImage normally uses FUSE; `APPIMAGE_EXTRACT_AND_RUN=1` is an alternative
-- Check that Qt6 is properly installed
-- Verify `linuxdeploy` can find Qt plugin
+```sh
+packaging/package-linux.sh 1.0.0 build dist all
+```
 
-### RPM dependencies not found
-- Adjust `Requires:` field to match target distribution
-- Fedora uses `qt6-qtbase`, RHEL might differ
+The script requires `dpkg-deb` (and preferably `dpkg-shlibdeps`) for Debian,
+`rpmbuild` for RPM, and standard GNU tar. AppImage creation is kept in the
+release workflow because linuxdeploy supplies the Qt bundling tool. To build
+the Arch package from a tagged checkout:
 
-### Package size too large
-- Check bundled dependencies
-- Consider static linking strategy
-- Verify no debug symbols are included
+```sh
+sed -i 's/^pkgver=.*/pkgver=1.0.0/' packaging/PKGBUILD
+makepkg --cleanbuild --syncdeps
+```
 
-## Future Enhancements
+`packaging/stage-linux.sh` is the common staging entry point. It installs via
+CMake, adds the desktop entry, documentation, icon, and any generated
+translation files. `packaging/test-packages.sh` performs local metadata and
+archive checks without requiring audio hardware.
 
-Potential additions to the packaging system:
+## Runtime requirements
 
-- [ ] Flatpak package
-- [ ] Snap package
-- [ ] Checksums (SHA256) for all artifacts
-- [ ] GPG signing of packages
-- [ ] AUR (Arch User Repository) automatic publishing
-- [ ] Homebrew formula for macOS
-- [ ] Validation tests for each package format
-- [ ] Multi-architecture builds (arm64, armhf)
+Binary packages are built on Ubuntu 24.04 and therefore target x86_64 Linux
+systems with compatible glibc and Qt/PipeWire ABI versions. The source-based
+Arch and Nix recipes use the target distribution's dependencies. None of the
+package checks exercise live routing; that requires two distinct output sinks,
+monitor ports, and a running PipeWire session manager.

@@ -12,18 +12,23 @@ class QSlider;
 class QPushButton;
 class QMenu;
 class QAction;
+class QActionGroup;
 class QCloseEvent;
+class QEvent;
+class QTranslator;
 
-// 主窗口：选择监听源/转发目标输出设备、音量、启停；
-// 关闭窗口时最小化到系统托盘，转发继续在后台运行。
+// Main window for selecting the source/target devices, volume, and run state.
+// Closing the window hides it in the system tray while forwarding continues.
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
     explicit MainWindow(QWidget* parent = nullptr);
+    MainWindow(AudioRouter* router, QWidget* parent);
     ~MainWindow() override;
 
 protected:
     void closeEvent(QCloseEvent* event) override;
+    void changeEvent(QEvent* event) override;
 
 private slots:
     void refreshDevices();
@@ -36,18 +41,26 @@ private slots:
     void trayActivated(QSystemTrayIcon::ActivationReason reason);
     void showMainWindow();
     void quitApp();
+    void selectEnglish();
+    void selectSimplifiedChinese();
 
 private:
     void buildUi();
+    void retranslateUi();
     void updateUiState();
-    // 设备/服务故障后安排一次退避重连；超过重试上限则放弃并提示。
+    // Schedule one exponential-backoff reconnect after a device/service fault.
     void scheduleReconnect();
     void cancelReconnect();
     void loadSettings();
     void saveSettings();
-    // 依据持久化的 id（回退名称）恢复下拉框选择
+    // Restore a combo-box selection by persisted ID, falling back to its name.
     void applySavedSelection(QComboBox* box, const QString& id, const QString& name);
     void hideToTray();
+    QString configuredLanguage() const;
+    QString defaultLanguage() const;
+    bool installLanguage(const QString& language, bool persist);
+    void updateLanguageActions();
+    void updateReconnectStatus();
 
     AudioRouter* m_router = nullptr;
 
@@ -55,6 +68,10 @@ private:
     QComboBox* m_target = nullptr;
     QSlider* m_volume = nullptr;
     QLabel* m_volumeLabel = nullptr;
+    QLabel* m_sourceTitle = nullptr;
+    QLabel* m_targetTitle = nullptr;
+    QLabel* m_volumeTitle = nullptr;
+    QLabel* m_hint = nullptr;
     QLabel* m_status = nullptr;
     QPushButton* m_startStop = nullptr;
     QPushButton* m_refresh = nullptr;
@@ -64,18 +81,26 @@ private:
     QAction* m_trayShow = nullptr;
     QAction* m_trayStartStop = nullptr;
     QAction* m_trayQuit = nullptr;
+    QMenu* m_languageMenu = nullptr;
+    QAction* m_languageEnglish = nullptr;
+    QAction* m_languageChinese = nullptr;
+    QActionGroup* m_languageGroup = nullptr;
+    QTranslator* m_translator = nullptr;
 
     bool m_running = false;
     bool m_quitting = false;
     bool m_trayMessageShown = false;
 
-    // 自动重连：仅在 StopReason 为设备/服务故障时启动。
+    // Automatic reconnect is used only for device/service failures.
     QTimer* m_reconnectTimer = nullptr;
     int m_reconnectAttempt = 0;
+    int m_reconnectDelayMs = 0;
     QString m_reconnectSourceId;
     QString m_reconnectTargetId;
+    QString m_lastError;
+    QString m_languageCode;
 
-    // 待恢复的选择（首次刷新设备后应用）
+    // Saved selections applied after the first device refresh.
     QString m_savedSourceId;
     QString m_savedSourceName;
     QString m_savedTargetId;

@@ -1,7 +1,7 @@
-# AudioMonitor 的 Nix 打包表达式。
-# 用法（经典模式，无需 flake）:
+# Nix package expression for AudioMonitor.
+# Classic usage without flakes:
 #   nix-build -E 'with import <nixpkgs> {}; callPackage ./default.nix {}'
-# 或通过 flake:
+# Or with the flake:
 #   nix build .#audiomonitor
 {
   lib
@@ -19,7 +19,7 @@ stdenv.mkDerivation (finalAttrs: {
 
   src = lib.cleanSourceWith {
     src = ./.;
-    # 剔除本地构建产物，避免污染 nix store
+    # Exclude local build products from the Nix source tree.
     filter = name: type:
       !(type == "directory"
         && (baseNameOf name == "build" || baseNameOf name == "dist"));
@@ -28,24 +28,41 @@ stdenv.mkDerivation (finalAttrs: {
   nativeBuildInputs = [
     cmake
     pkg-config
-    qt6.wrapQtAppsHook # 自动包装二进制：注入 Qt 平台插件等运行库路径
+    qt6.qttools
+    qt6.wrapQtAppsHook
   ];
 
   buildInputs = [
-    qt6.qtbase      # QtWidgets/QtGui/QtCore
-    pipewire        # Linux 原生 PipeWire 客户端库与开发文件
-    libglvnd        # Qt6Gui 依赖的 OpenGL（FindOpenGL 需要头文件与 libGL.so）
+    qt6.qtbase
+    pipewire
+    libglvnd
   ];
 
   cmakeFlags = [
     "-DCMAKE_BUILD_TYPE=Release"
-    # 显式给出 OpenGL 的查找路径，避免 FindOpenGL 在纯净环境中落空
+    # Help FindOpenGL locate libglvnd in minimal Nix environments.
     "-DCMAKE_INCLUDE_PATH=${lib.getDev libglvnd}/include"
     "-DCMAKE_LIBRARY_PATH=${lib.getLib libglvnd}/lib"
   ];
 
+  doCheck = true;
+
+  postInstall = ''
+    if [[ "$sourceRoot" = /* ]]; then
+      packageSource="$sourceRoot"
+    else
+      packageSource="$NIX_BUILD_TOP/$sourceRoot"
+    fi
+    install -Dm644 "$packageSource/packaging/audiomonitor.desktop" \
+      $out/share/applications/audiomonitor.desktop
+    install -Dm644 "$packageSource/README.md" $out/share/doc/audiomonitor/README.md
+    install -Dm644 "$packageSource/LICENSE" $out/share/licenses/audiomonitor/LICENSE
+    mkdir -p $out/share/icons/hicolor/256x256/apps
+    bash "$packageSource/packaging/create-icon.sh" $out/share/icons/hicolor/256x256/apps
+  '';
+
   meta = with lib; {
-    description = "把一个输出设备正在播放的音频实时转发到另一个输出设备";
+    description = "Forward audio from one output device to another in real time";
     license = licenses.mit;
     mainProgram = "audiomonitor";
     platforms = platforms.linux;
