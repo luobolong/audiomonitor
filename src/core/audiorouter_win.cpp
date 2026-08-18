@@ -123,6 +123,8 @@ float decodeFloat(uint32_t bits) noexcept
 // behavior.
 class MmcssRegistration final {
 public:
+    MmcssRegistration() = default;
+
     void registerCurrentThread() noexcept
     {
         reset();

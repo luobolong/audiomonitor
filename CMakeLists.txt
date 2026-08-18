@@ -77,12 +77,31 @@ if(BUILD_TESTING)
 endif()
 
 if(QT_VERSION_MAJOR EQUAL 6)
-    # Compile and embed both catalogs in the application and GUI test target
-    # so they exercise the same resource paths.
-    qt_add_translations(TARGETS ${AUDIOMONITOR_TRANSLATION_TARGETS}
+    # Qt 6.4 (used by Ubuntu 24.04) accepts the target as a positional
+    # argument.  Newer Qt releases also support TARGETS, but using the
+    # compatible form keeps the CI and local builds on the same code path.
+    # Compile and embed the catalogs in the application first.
+    qt_add_translations(audiomonitor
         TS_FILES ${AUDIOMONITOR_TRANSLATIONS}
         RESOURCE_PREFIX "/translations"
     )
+
+    # Reuse the generated catalogs for the GUI test target.  Generating the
+    # same .qm files a second time creates duplicate-output rules with Ninja.
+    if(BUILD_TESTING)
+        set(AUDIOMONITOR_QM_FILES
+            "${CMAKE_CURRENT_BINARY_DIR}/audiomonitor_en.qm"
+            "${CMAKE_CURRENT_BINARY_DIR}/audiomonitor_zh_CN.qm"
+        )
+        set_source_files_properties(${AUDIOMONITOR_QM_FILES}
+            PROPERTIES GENERATED TRUE
+        )
+        qt_add_resources(mainwindow_tests mainwindow_tests_translations
+            PREFIX "/translations"
+            BASE "${CMAKE_CURRENT_BINARY_DIR}"
+            FILES ${AUDIOMONITOR_QM_FILES}
+        )
+    endif()
 else()
     # Qt 5 does not provide qt_add_translations(). Generate the catalogs once
     # and share one resource source with each target using the same prefix.
