@@ -1,0 +1,25 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=AudioMonitor
+GenericName=Audio Forwarding Tool
+Comment=Forward audio output from one device to another in real-time
+Comment[zh_CN]=实时将音频从一个输出设备转发到另一个输出设备
+
+Exec=audiomonitor
+Icon=audiomonitor
+Terminal=false
+
+Categories=AudioVideo;Audio;Utility;
+Keywords=audio;monitor;forwarding;pipewire;loopback;wasapi;
+
+StartupNotify=true
+StartupWMClass=audiomonitor
+
+# Actions for quick access
+Actions=ListDevices;
+
+[Desktop Action ListDevices]
+Name=List Audio Devices
+Name[zh_CN]=列出音频设备
+Exec=audiomonitor --list-devices

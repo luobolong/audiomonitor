@@ -1,0 +1,130 @@
+name: Build
+
+# Continuous integration build for all pushes and PRs.
+# For release packaging (deb, rpm, AppImage, etc.), see release.yml which runs on tags.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build pkg-config qt6-base-dev libpipewire-0.3-dev
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audiomonitor-linux
+          path: build/audiomonitor
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.*'
+          arch: win64_msvc2022_64
+          cache: true
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --config Release
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Package
+        shell: pwsh
+        run: |
+          $bundleDir = 'package/audiomonitor-windows'
+          cmake -E make_directory $bundleDir
+          cmake -E copy build/Release/audiomonitor.exe "$bundleDir/audiomonitor.exe"
+
+          # This Widgets-only application does not use OpenGL, D3D shaders,
+          # networking, SVG, external image codecs, or touch input plugins.
+          windeployqt --release --no-compiler-runtime --no-translations --no-opengl-sw --no-system-d3d-compiler --no-system-dxc-compiler --skip-plugin-types 'generic,iconengines,imageformats,networkinformation,tls' "$bundleDir/audiomonitor.exe"
+
+          # App-local CRT DLLs are much smaller than bundling vc_redist.x64.exe
+          # and keep the portable package runnable on a clean Windows install.
+          if (-not $env:VCToolsRedistDir) {
+            throw 'VCToolsRedistDir is not set by the MSVC environment'
+          }
+          $crtRoot = Join-Path $env:VCToolsRedistDir 'x64'
+          $crtDirs = @(Get-ChildItem -LiteralPath $crtRoot -Directory `
+            -Filter 'Microsoft.VC*.CRT' -ErrorAction SilentlyContinue)
+          if ($crtDirs.Count -eq 0) {
+            throw "MSVC runtime directory not found below: $crtRoot"
+          }
+          $crtDir = $crtDirs | Sort-Object -Property Name -Descending |
+            Select-Object -First 1
+          Write-Host "Using MSVC runtime: $($crtDir.FullName)"
+          Get-ChildItem -LiteralPath $crtDir.FullName -Filter '*.dll' -File |
+            Copy-Item -Destination $bundleDir
+      - name: Verify package
+        shell: pwsh
+        run: |
+          $bundleDir = 'package/audiomonitor-windows'
+          $required = @(
+            "$bundleDir/audiomonitor.exe",
+            "$bundleDir/Qt6Core.dll",
+            "$bundleDir/Qt6Gui.dll",
+            "$bundleDir/Qt6Widgets.dll",
+            "$bundleDir/platforms/qwindows.dll",
+            "$bundleDir/msvcp140.dll",
+            "$bundleDir/vcruntime140.dll"
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "Missing deployed file: $path"
+            }
+          }
+
+          $excluded = @(
+            'opengl32sw.dll',
+            'D3Dcompiler_47.dll',
+            'dxcompiler.dll',
+            'dxil.dll',
+            'Qt6Network.dll',
+            'Qt6Svg.dll',
+            'vc_redist.x64.exe'
+          )
+          foreach ($name in $excluded) {
+            if (Test-Path -LiteralPath "$bundleDir/$name") {
+              throw "Unexpected oversized or unused file: $name"
+            }
+          }
+
+          $archiveRoot = @(Get-ChildItem -LiteralPath package)
+          if ($archiveRoot.Count -ne 1 -or
+              $archiveRoot[0].Name -ne 'audiomonitor-windows' -or
+              -not $archiveRoot[0].PSIsContainer) {
+            throw 'The artifact must contain one top-level audiomonitor-windows directory'
+          }
+
+          $files = @(Get-ChildItem -LiteralPath $bundleDir -Recurse -File)
+          $totalBytes = ($files | Measure-Object -Property Length -Sum).Sum
+          Write-Host ('Package size: {0:N1} MB across {1} files' -f `
+            ($totalBytes / 1MB), $files.Count)
+
+          $process = Start-Process -FilePath "$bundleDir/audiomonitor.exe" `
+            -ArgumentList '--smoke-test', '500' -PassThru -Wait
+          if ($process.ExitCode -ne 0) {
+            throw "Packaged application exited with code $($process.ExitCode)"
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audiomonitor-windows
+          path: package/
