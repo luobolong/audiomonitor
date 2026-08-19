@@ -41,6 +41,7 @@ constexpr const char* kOutputPortNames[kChannelCount] = {
     "playback_FL",
     "playback_FR",
 };
+constexpr float kMaxVolume = 5.0f;
 
 static_assert(std::atomic<uint32_t>::is_always_lock_free,
               "The PipeWire realtime path requires lock-free 32-bit atomics");
@@ -421,7 +422,7 @@ public:
     {
         if (!std::isfinite(volume))
             return;
-        const float clamped = std::clamp(volume, 0.0f, 2.0f);
+        const float clamped = std::clamp(volume, 0.0f, kMaxVolume);
         m_volumeBits.store(encodeFloat(clamped), std::memory_order_relaxed);
     }
 
@@ -1220,7 +1221,7 @@ private:
 
     void setVolumeLocked(float volume) noexcept
     {
-        const float clamped = std::clamp(volume, 0.0f, 2.0f);
+        const float clamped = std::clamp(volume, 0.0f, kMaxVolume);
         m_volumeBits.store(encodeFloat(clamped), std::memory_order_relaxed);
     }
 

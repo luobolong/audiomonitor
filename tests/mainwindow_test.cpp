@@ -4,15 +4,19 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QMetaObject>
 #include <QMenu>
 #include <QLocale>
 #include <QPushButton>
+#include <QSlider>
 #include <QSettings>
+#include <QSpinBox>
 #include <QTemporaryDir>
 
 #include <cstdlib>
+#include <cmath>
 #include <iostream>
 #include <utility>
 #include <vector>
@@ -272,6 +276,56 @@ void testInvalidAndIdenticalSelections()
     }
 }
 
+void testVolumeRange()
+{
+    auto* router = new FakeRouter;
+    router->devices = {
+        { QStringLiteral("source"), QStringLiteral("Source"), true },
+        { QStringLiteral("target"), QStringLiteral("Target"), false },
+    };
+    MainWindow window(router, nullptr);
+    QSlider* volume = window.findChild<QSlider*>();
+    QSpinBox* volumeInput = window.findChild<QSpinBox*>(QStringLiteral("volumeInput"));
+    expect(volume != nullptr, "volume slider is discoverable for tests");
+    expect(volumeInput != nullptr, "volume input is discoverable for tests");
+    if (!volume || !volumeInput)
+        return;
+
+    expect(volume->minimum() == 0 && volume->maximum() == 500,
+           "volume slider spans 0 to 500 percent");
+    expect(volumeInput->minimum() == 0 && volumeInput->maximum() == 500,
+           "volume input spans 0 to 500 percent");
+    volume->setValue(500);
+    expect(std::abs(router->lastVolume - 5.0f) < 0.0001f,
+           "maximum volume maps to a 5x gain");
+    volume->setValue(95);
+    QKeyEvent release(QEvent::KeyRelease, Qt::Key_Right, Qt::NoModifier);
+    QCoreApplication::sendEvent(volume, &release);
+    expect(volumeInput->value() == 100,
+           "slider snaps nearby values to the 100 percent preset");
+    volumeInput->setValue(437);
+    expect(volumeInput->value() == 437 && std::abs(router->lastVolume - 4.37f) < 0.0001f,
+           "volume input updates the slider without snapping exact values");
+    volumeInput->setValue(100);
+    const int positionAt100 = volume->value();
+    volumeInput->setValue(50);
+    const int positionAt50 = volume->value();
+    volumeInput->setValue(150);
+    const int positionAt150 = volume->value();
+    volumeInput->setValue(200);
+    const int positionAt200 = volume->value();
+    expect(positionAt50 == 50 && positionAt100 - positionAt50 == 50
+               && positionAt150 - positionAt100 == 50
+               && positionAt200 - positionAt150 == 50,
+           "volume slider keeps 0 to 200 uniformly spaced");
+    volumeInput->setValue(300);
+    const int positionAt300 = volume->value();
+    volumeInput->setValue(500);
+    const int positionAt500 = volume->value();
+    expect(positionAt300 - positionAt200 > positionAt500 - positionAt300,
+           "volume slider packs larger values more densely");
+}
+
 void testLanguageSwitchUpdatesWidgetsAndTray()
 {
     setLanguageSetting(QStringLiteral("en"));
@@ -422,6 +476,7 @@ int main(int argc, char* argv[])
     testRefreshCannotOverwriteSessionIds();
     testRepeatedStartStop();
     testInvalidAndIdenticalSelections();
+    testVolumeRange();
     testLanguageSwitchUpdatesWidgetsAndTray();
     testLanguagePersistenceAndLocaleDefault();
     testDeviceNamesRemainOpaque();

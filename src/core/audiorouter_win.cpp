@@ -36,6 +36,8 @@
 
 namespace {
 
+constexpr float kMaxVolume = 5.0f;
+
 // Minimal COM smart pointer that does not depend on ATL and works with both
 // MSVC and MinGW.
 template <typename T>
@@ -339,7 +341,7 @@ public:
         : m_owner(owner),
           m_sourceId(std::move(sourceId)),
           m_targetId(std::move(targetId)),
-          m_volumeBits(encodeFloat(std::clamp(volume, 0.0f, 2.0f))),
+          m_volumeBits(encodeFloat(std::clamp(volume, 0.0f, kMaxVolume))),
           m_stop(false),
           m_running(false),
           m_captureIsFloat32(true),
@@ -452,7 +454,7 @@ public:
     {
         if (!std::isfinite(v))
             return;
-        m_volumeBits.store(encodeFloat(std::clamp(v, 0.0f, 2.0f)),
+        m_volumeBits.store(encodeFloat(std::clamp(v, 0.0f, kMaxVolume)),
                            std::memory_order_relaxed);
     }
 

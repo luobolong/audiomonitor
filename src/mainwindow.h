@@ -9,6 +9,7 @@ class QTimer;
 class QComboBox;
 class QLabel;
 class QSlider;
+class QSpinBox;
 class QPushButton;
 class QMenu;
 class QAction;
@@ -37,6 +38,7 @@ private slots:
     void onStopped(StopReason reason);
     void onError(const QString& message);
     void onVolumeChanged(int value);
+    void onVolumeInputChanged(int value);
     void attemptReconnect();
     void trayActivated(QSystemTrayIcon::ActivationReason reason);
     void showMainWindow();
@@ -61,13 +63,14 @@ private:
     bool installLanguage(const QString& language, bool persist);
     void updateLanguageActions();
     void updateReconnectStatus();
+    void applyVolumeValue(int value);
 
     AudioRouter* m_router = nullptr;
 
     QComboBox* m_source = nullptr;
     QComboBox* m_target = nullptr;
     QSlider* m_volume = nullptr;
-    QLabel* m_volumeLabel = nullptr;
+    QSpinBox* m_volumeInput = nullptr;
     QLabel* m_sourceTitle = nullptr;
     QLabel* m_targetTitle = nullptr;
     QLabel* m_volumeTitle = nullptr;

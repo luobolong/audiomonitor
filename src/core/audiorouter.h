@@ -46,7 +46,7 @@ public:
     // Enumerate output devices usable as source or target (GUI thread only).
     virtual QVector<DeviceInfo> outputDevices() = 0;
 
-    // Start forwarding. volume is in the range 0.0 to 2.0 (1.0 is unity).
+    // Start forwarding. volume is in the range 0.0 to 5.0 (1.0 is unity).
     // On success emits started(); on failure returns false and emits an error.
     virtual bool start(const QString& sourceId, const QString& targetId, float volume) = 0;
 
@@ -60,7 +60,7 @@ public:
     // empty for backends that do not expose session recovery state.
     virtual SessionDeviceIds lastSessionDeviceIds() const { return {}; }
 
-    // Change the volume while running, in the range 0.0 to 2.0.
+    // Change the volume while running, in the range 0.0 to 5.0.
     virtual void setVolume(float volume) = 0;
 
     // Debug dumps are optional backend capabilities. Unsupported backends

@@ -11,19 +11,30 @@
 #include <QEvent>
 #include <QFormLayout>
 #include <QHBoxLayout>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QMenu>
 #include <QMessageBox>
 #include <QLocale>
+#include <QPaintEvent>
+#include <QPainter>
 #include <QPushButton>
 #include <QSettings>
-#include <QTranslator>
-
-#include <iterator>
+#include <QSignalBlocker>
 #include <QSlider>
+#include <QSpinBox>
+#include <QStyleOptionSlider>
 #include <QSystemTrayIcon>
 #include <QTimer>
+#include <QTranslator>
+#include <QWheelEvent>
 #include <QVBoxLayout>
+
+#include <array>
+#include <algorithm>
+#include <cmath>
+#include <iterator>
+#include <vector>
 
 namespace {
 // Reconnect backoff sequence (milliseconds). Device re-enumeration normally
@@ -36,6 +47,156 @@ constexpr auto kEnglishLanguage = "en";
 constexpr auto kSimplifiedChineseLanguage = "zh_CN";
 constexpr int kDeviceNameRole = Qt::UserRole + 1;
 constexpr int kDeviceDefaultRole = Qt::UserRole + 2;
+constexpr int kVolumeMinPercent = 0;
+constexpr int kVolumeMaxPercent = 500;
+constexpr int kVolumeUniformMaxPercent = 200;
+constexpr int kVolumeHighRangePercent = kVolumeMaxPercent - kVolumeUniformMaxPercent;
+constexpr int kVolumeDefaultPercent = 100;
+constexpr float kVolumePercentScale = 100.0f;
+constexpr int kVolumeSnapThreshold = 10;
+constexpr std::array<int, 8> kVolumeTickValues = {
+    0, 50, 100, 150, 200, 300, 400, 500
+};
+
+int snappedVolumeValue(int value) noexcept
+{
+    int closest = value;
+    int closestDistance = kVolumeSnapThreshold + 1;
+    for (const int snapValue : kVolumeTickValues) {
+        const int distance = std::abs(value - snapValue);
+        if (distance <= kVolumeSnapThreshold && distance < closestDistance) {
+            closest = snapValue;
+            closestDistance = distance;
+        }
+    }
+    return closest;
+}
+
+class VolumeSlider final : public QSlider {
+public:
+    using QSlider::QSlider;
+
+    void paintEvent(QPaintEvent* event) override
+    {
+        QSlider::paintEvent(event);
+
+        QStyleOptionSlider option;
+        initStyleOption(&option);
+        QPainter painter(this);
+        const QPalette::ColorGroup colorGroup = isEnabled() ? QPalette::Active
+                                                              : QPalette::Disabled;
+        const QColor textColor = palette().color(colorGroup, QPalette::WindowText);
+        painter.setPen(QPen(textColor, 1));
+        painter.setFont(font());
+        const QFontMetrics metrics(painter.font());
+
+        const int tickY = std::max(0, height() - metrics.height() - 8);
+        const int labelTop = tickY + 8;
+        struct TickLabel {
+            QRect rect;
+            QString text;
+        };
+        std::vector<TickLabel> labels;
+        for (const int volume : kVolumeTickValues) {
+            option.sliderPosition = positionForVolume(volume);
+            option.sliderValue = option.sliderPosition;
+            const QRect handle = style()->subControlRect(
+                QStyle::CC_Slider, &option, QStyle::SC_SliderHandle, this);
+            if (!handle.isValid())
+                continue;
+            painter.drawLine(handle.center().x(), tickY, handle.center().x(),
+                             std::min(height() - 1, tickY + 6));
+
+            const double gain = double(volume) / double(kVolumePercentScale);
+            const QString label = QStringLiteral("%1x").arg(gain, 0, 'g', 3);
+            const int labelWidth = metrics.horizontalAdvance(label);
+            const int labelX = std::clamp(handle.center().x() - labelWidth / 2,
+                                          0, std::max(0, width() - labelWidth));
+            labels.push_back({ QRect(labelX, labelTop, labelWidth, metrics.height()), label });
+        }
+
+        // Keep every tick visible, but omit labels that would overlap when
+        // the window is narrow. The endpoints remain visible at all widths.
+        constexpr int kLabelGap = 4;
+        std::vector<TickLabel> visibleLabels;
+        for (std::size_t i = 0; i < labels.size(); ++i) {
+            const bool isEndpoint = i == 0 || i + 1 == labels.size();
+            if (!isEndpoint && !visibleLabels.empty()
+                && labels[i].rect.left() <= visibleLabels.back().rect.right() + kLabelGap) {
+                continue;
+            }
+            if (isEndpoint && i + 1 == labels.size()) {
+                while (!visibleLabels.empty()
+                       && labels[i].rect.left()
+                           <= visibleLabels.back().rect.right() + kLabelGap) {
+                    visibleLabels.pop_back();
+                }
+            }
+            visibleLabels.push_back(labels[i]);
+        }
+        for (const TickLabel& label : visibleLabels) {
+            painter.drawText(label.rect, Qt::AlignHCenter | Qt::AlignTop, label.text);
+        }
+    }
+
+    // Keep the original uniform 0-200 range, then use a square curve that
+    // packs larger values into the high end of the slider.
+    static int volumeForPosition(int position) noexcept
+    {
+        const int clamped = std::clamp(position, kVolumeMinPercent, kVolumeMaxPercent);
+        if (clamped <= kVolumeUniformMaxPercent)
+            return clamped;
+        const double normalized = double(clamped - kVolumeUniformMaxPercent)
+            / double(kVolumeHighRangePercent);
+        return kVolumeUniformMaxPercent
+            + int(std::lround(normalized * normalized * double(kVolumeHighRangePercent)));
+    }
+
+    static int positionForVolume(int volume) noexcept
+    {
+        const int clamped = std::clamp(volume, kVolumeMinPercent, kVolumeMaxPercent);
+        if (clamped <= kVolumeUniformMaxPercent)
+            return clamped;
+        const double normalized = double(clamped - kVolumeUniformMaxPercent)
+            / double(kVolumeHighRangePercent);
+        return kVolumeUniformMaxPercent
+            + int(std::lround(std::sqrt(normalized) * double(kVolumeHighRangePercent)));
+    }
+
+protected:
+    void mouseMoveEvent(QMouseEvent* event) override
+    {
+        QSlider::mouseMoveEvent(event);
+        snapToSpecialValue();
+    }
+
+    void mouseReleaseEvent(QMouseEvent* event) override
+    {
+        QSlider::mouseReleaseEvent(event);
+        snapToSpecialValue();
+    }
+
+    void wheelEvent(QWheelEvent* event) override
+    {
+        QSlider::wheelEvent(event);
+        snapToSpecialValue();
+    }
+
+    void keyReleaseEvent(QKeyEvent* event) override
+    {
+        QSlider::keyReleaseEvent(event);
+        snapToSpecialValue();
+    }
+
+private:
+    void snapToSpecialValue()
+    {
+        const int volume = volumeForPosition(value());
+        const int snapped = snappedVolumeValue(volume);
+        if (snapped != volume)
+            setValue(positionForVolume(snapped));
+    }
+};
 
 QString colorStatus(const QString& color, const QString& text)
 {
@@ -140,16 +301,22 @@ void MainWindow::buildUi()
     m_hint->setStyleSheet(QStringLiteral("color: #666; font-size: 12px;"));
     form->addRow(QString(), m_hint);
 
-    m_volume = new QSlider(Qt::Horizontal, central);
-    m_volume->setRange(0, 200);
-    m_volume->setValue(100);
-    m_volume->setTickPosition(QSlider::TicksBelow);
-    m_volume->setTickInterval(50);
-    m_volumeLabel = new QLabel(QStringLiteral("100%"), central);
-    m_volumeLabel->setMinimumWidth(44);
+    m_volume = new VolumeSlider(Qt::Horizontal, central);
+    m_volume->setObjectName(QStringLiteral("volumeSlider"));
+    m_volume->setRange(kVolumeMinPercent, kVolumeMaxPercent);
+    m_volume->setValue(VolumeSlider::positionForVolume(kVolumeDefaultPercent));
+    m_volume->setTickPosition(QSlider::NoTicks);
+    m_volume->setMinimumHeight(42);
+    m_volumeInput = new QSpinBox(central);
+    m_volumeInput->setObjectName(QStringLiteral("volumeInput"));
+    m_volumeInput->setRange(kVolumeMinPercent, kVolumeMaxPercent);
+    m_volumeInput->setValue(kVolumeDefaultPercent);
+    m_volumeInput->setSuffix(QStringLiteral("%"));
+    m_volumeInput->setAlignment(Qt::AlignRight);
+    m_volumeInput->setMinimumWidth(72);
     auto* volRow = new QHBoxLayout();
     volRow->addWidget(m_volume, 1);
-    volRow->addWidget(m_volumeLabel);
+    volRow->addWidget(m_volumeInput);
     m_volumeTitle = new QLabel(central);
     form->addRow(m_volumeTitle, volRow);
 
@@ -195,6 +362,8 @@ void MainWindow::buildUi()
 
     connect(m_refresh, &QPushButton::clicked, this, &MainWindow::refreshDevices);
     connect(m_volume, &QSlider::valueChanged, this, &MainWindow::onVolumeChanged);
+    connect(m_volumeInput, qOverload<int>(&QSpinBox::valueChanged), this,
+            &MainWindow::onVolumeInputChanged);
     connect(m_startStop, &QPushButton::clicked, this, &MainWindow::startStopClicked);
     connect(m_tray, &QSystemTrayIcon::activated, this, &MainWindow::trayActivated);
     connect(m_trayShow, &QAction::triggered, this, &MainWindow::showMainWindow);
@@ -327,9 +496,6 @@ void MainWindow::retranslateUi()
     updateLabels(m_source);
     updateLabels(m_target);
 
-    if (m_volumeLabel && m_volume)
-        m_volumeLabel->setText(QStringLiteral("%1%").arg(m_volume->value()));
-
     // Rebuild state-dependent messages in the newly selected language.
     if (m_reconnectTimer && m_reconnectTimer->isActive())
         updateReconnectStatus();
@@ -426,7 +592,7 @@ void MainWindow::startStopClicked()
             tr("The source and target must be different to prevent an audio feedback loop.")));
         return;
     }
-    const float volume = m_volume->value() / 100.0f;
+    const float volume = m_volumeInput->value() / kVolumePercentScale;
     m_router->start(srcId, tgtId, volume); // Completion is reported by signals.
 }
 
@@ -550,7 +716,7 @@ void MainWindow::attemptReconnect()
         return;
     }
 
-    const float volume = m_volume->value() / 100.0f;
+    const float volume = m_volumeInput->value() / kVolumePercentScale;
     if (!m_router->start(m_reconnectSourceId, m_reconnectTargetId, volume))
         scheduleReconnect(); // start() reports the error; schedule the next attempt.
 }
@@ -566,9 +732,27 @@ void MainWindow::onError(const QString& message)
 
 void MainWindow::onVolumeChanged(int value)
 {
-    m_volumeLabel->setText(QStringLiteral("%1%").arg(value));
+    applyVolumeValue(VolumeSlider::volumeForPosition(value));
+}
+
+void MainWindow::onVolumeInputChanged(int value)
+{
+    const int position = VolumeSlider::positionForVolume(value);
+    if (m_volume && m_volume->value() != position) {
+        const QSignalBlocker blocker(m_volume);
+        m_volume->setValue(position);
+    }
+    applyVolumeValue(value);
+}
+
+void MainWindow::applyVolumeValue(int value)
+{
+    if (m_volumeInput && m_volumeInput->value() != value) {
+        const QSignalBlocker blocker(m_volumeInput);
+        m_volumeInput->setValue(value);
+    }
     if (m_router)
-        m_router->setVolume(value / 100.0f);
+        m_router->setVolume(value / kVolumePercentScale);
     saveSettings();
 }
 
@@ -666,8 +850,7 @@ void MainWindow::closeEvent(QCloseEvent* event)
 void MainWindow::loadSettings()
 {
     QSettings s;
-    m_volume->setValue(s.value(QStringLiteral("volume"), 100).toInt());
-    m_volumeLabel->setText(QStringLiteral("%1%").arg(m_volume->value()));
+    m_volumeInput->setValue(s.value(QStringLiteral("volume"), kVolumeDefaultPercent).toInt());
     m_savedSourceId = s.value(QStringLiteral("source/id")).toString();
     m_savedSourceName = s.value(QStringLiteral("source/name")).toString();
     m_savedTargetId = s.value(QStringLiteral("target/id")).toString();
@@ -677,7 +860,7 @@ void MainWindow::loadSettings()
 void MainWindow::saveSettings()
 {
     QSettings s;
-    s.setValue(QStringLiteral("volume"), m_volume->value());
+    s.setValue(QStringLiteral("volume"), m_volumeInput->value());
     const auto currentDeviceName = [](QComboBox* box) {
         const int index = box ? box->currentIndex() : -1;
         const QVariant nameData = index >= 0 ? box->itemData(index, kDeviceNameRole) : QVariant{};
