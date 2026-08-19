@@ -298,7 +298,7 @@ void testVolumeRange()
     volume->setValue(500);
     expect(std::abs(router->lastVolume - 5.0f) < 0.0001f,
            "maximum volume maps to a 5x gain");
-    volume->setValue(95);
+    volume->setValue(119);
     QKeyEvent release(QEvent::KeyRelease, Qt::Key_Right, Qt::NoModifier);
     QCoreApplication::sendEvent(volume, &release);
     expect(volumeInput->value() == 100,
@@ -314,9 +314,9 @@ void testVolumeRange()
     const int positionAt150 = volume->value();
     volumeInput->setValue(200);
     const int positionAt200 = volume->value();
-    expect(positionAt50 == 50 && positionAt100 - positionAt50 == 50
-               && positionAt150 - positionAt100 == 50
-               && positionAt200 - positionAt150 == 50,
+    expect(positionAt50 == 63 && positionAt100 == 125
+               && positionAt150 == 188 && positionAt200 == 250
+               && positionAt200 == volume->maximum() / 2,
            "volume slider keeps 0 to 200 uniformly spaced");
     volumeInput->setValue(300);
     const int positionAt300 = volume->value();

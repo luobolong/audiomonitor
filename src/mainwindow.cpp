@@ -51,6 +51,8 @@ constexpr int kVolumeMinPercent = 0;
 constexpr int kVolumeMaxPercent = 500;
 constexpr int kVolumeUniformMaxPercent = 200;
 constexpr int kVolumeHighRangePercent = kVolumeMaxPercent - kVolumeUniformMaxPercent;
+constexpr int kVolumeUniformTrackMax = kVolumeMaxPercent / 2;
+constexpr int kVolumeHighTrackRange = kVolumeMaxPercent - kVolumeUniformTrackMax;
 constexpr int kVolumeDefaultPercent = 100;
 constexpr float kVolumePercentScale = 100.0f;
 constexpr int kVolumeSnapThreshold = 10;
@@ -144,10 +146,12 @@ public:
     static int volumeForPosition(int position) noexcept
     {
         const int clamped = std::clamp(position, kVolumeMinPercent, kVolumeMaxPercent);
-        if (clamped <= kVolumeUniformMaxPercent)
-            return clamped;
-        const double normalized = double(clamped - kVolumeUniformMaxPercent)
-            / double(kVolumeHighRangePercent);
+        if (clamped <= kVolumeUniformTrackMax) {
+            const double normalized = double(clamped) / double(kVolumeUniformTrackMax);
+            return int(std::lround(normalized * double(kVolumeUniformMaxPercent)));
+        }
+        const double normalized = double(clamped - kVolumeUniformTrackMax)
+            / double(kVolumeHighTrackRange);
         return kVolumeUniformMaxPercent
             + int(std::lround(normalized * normalized * double(kVolumeHighRangePercent)));
     }
@@ -155,12 +159,14 @@ public:
     static int positionForVolume(int volume) noexcept
     {
         const int clamped = std::clamp(volume, kVolumeMinPercent, kVolumeMaxPercent);
-        if (clamped <= kVolumeUniformMaxPercent)
-            return clamped;
+        if (clamped <= kVolumeUniformMaxPercent) {
+            const double normalized = double(clamped) / double(kVolumeUniformMaxPercent);
+            return int(std::lround(normalized * double(kVolumeUniformTrackMax)));
+        }
         const double normalized = double(clamped - kVolumeUniformMaxPercent)
             / double(kVolumeHighRangePercent);
-        return kVolumeUniformMaxPercent
-            + int(std::lround(std::sqrt(normalized) * double(kVolumeHighRangePercent)));
+        return kVolumeUniformTrackMax
+            + int(std::lround(std::sqrt(normalized) * double(kVolumeHighTrackRange)));
     }
 
 protected:
