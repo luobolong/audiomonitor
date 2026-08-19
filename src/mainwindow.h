@@ -89,7 +89,6 @@ private:
 
     bool m_running = false;
     bool m_quitting = false;
-    bool m_trayMessageShown = false;
 
     // Automatic reconnect is used only for device/service failures.
     QTimer* m_reconnectTimer = nullptr;

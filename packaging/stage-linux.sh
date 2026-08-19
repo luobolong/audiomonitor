@@ -56,16 +56,15 @@ install -Dm644 "$PROJECT_ROOT/README.md" \
 install -Dm644 "$PROJECT_ROOT/LICENSE" \
     "$STAGE_DIR$PREFIX/share/doc/audiomonitor/LICENSE"
 
-# Package metadata expects an icon.  The application also draws its icon at
-# runtime, so keep generation optional for minimal build environments.
-ICON_DIR="$STAGE_DIR$PREFIX/share/icons/hicolor/256x256/apps"
-mkdir -p "$ICON_DIR"
-if command -v convert >/dev/null 2>&1; then
-    "$PROJECT_ROOT/packaging/create-icon.sh" "$ICON_DIR"
-else
-    printf 'ImageMagick not available; using the generated fallback icon.\n' >&2
-    "$PROJECT_ROOT/packaging/create-icon.sh" "$ICON_DIR"
-fi
+# Package metadata expects an icon.  Install every size of the binary PNG
+# the application embeds through the Qt resource system into the hicolor
+# theme so desktops pick the sharpest size for each context.
+ICON_ROOT="$PROJECT_ROOT/resources/icons"
+HICOLOR_DIR="$STAGE_DIR$PREFIX/share/icons/hicolor"
+for icon_size in 16 24 32 48 64 128 256; do
+    install -Dm644 "$ICON_ROOT/appicon_${icon_size}.png" \
+        "$HICOLOR_DIR/${icon_size}x${icon_size}/apps/audiomonitor.png"
+done
 
 # Qt may either embed translations in the executable or install generated
 # .qm files.  Copy generated files when present so both layouts remain usable.

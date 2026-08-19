@@ -285,7 +285,7 @@ void testLanguageSwitchUpdatesWidgetsAndTray()
     MainWindow window(router, nullptr);
     QComboBox* source = sourceBox(window);
     QMenu* menu = languageMenu(window, QStringLiteral("Language"));
-    expect(window.windowTitle() == QStringLiteral("AudioMonitor - Audio monitoring and forwarding"),
+    expect(window.windowTitle() == QStringLiteral("Audio Monitor"),
            "English is applied from the explicit setting");
     expect(hasButtonText(window, QStringLiteral("Refresh devices")),
            "English button text is visible");
@@ -299,9 +299,6 @@ void testLanguageSwitchUpdatesWidgetsAndTray()
 
     expect(invoke(window, "selectSimplifiedChinese"),
            "Simplified Chinese slot is invokable");
-    const QString sourceTitle = QStringLiteral("AudioMonitor - Audio monitoring and forwarding");
-    const QString translatedTitle = QCoreApplication::translate(
-        "MainWindow", "AudioMonitor - Audio monitoring and forwarding");
     const QString translatedRefresh = QCoreApplication::translate("MainWindow", "Refresh devices");
     const QString translatedSourceTitle = QCoreApplication::translate(
         "MainWindow", "Listen source (output device):");
@@ -310,8 +307,8 @@ void testLanguageSwitchUpdatesWidgetsAndTray()
     const QString translatedChinese = QCoreApplication::translate("MainWindow", "Simplified Chinese");
     const QString translatedDefault = QCoreApplication::translate("MainWindow", " (default)");
     menu = languageMenu(window, translatedLanguage);
-    expect(translatedTitle != sourceTitle && window.windowTitle() == translatedTitle,
-           "window title changes immediately to Simplified Chinese");
+    expect(window.windowTitle() == QStringLiteral("Audio Monitor"),
+           "window title stays constant after switching to Simplified Chinese");
     expect(hasButtonText(window, translatedRefresh),
            "button text changes immediately to Simplified Chinese");
     expect(hasLabelText(window, translatedSourceTitle),
@@ -351,11 +348,8 @@ void testLanguagePersistenceAndLocaleDefault()
     {
         auto* router = new FakeRouter;
         MainWindow window(router, nullptr);
-        const QString sourceTitle = QStringLiteral("AudioMonitor - Audio monitoring and forwarding");
-        const QString translatedTitle = QCoreApplication::translate(
-            "MainWindow", "AudioMonitor - Audio monitoring and forwarding");
-        expect(translatedTitle != sourceTitle && window.windowTitle() == translatedTitle,
-               "persisted Simplified Chinese is loaded on the next launch");
+        expect(window.windowTitle() == QStringLiteral("Audio Monitor"),
+               "persisted Simplified Chinese keeps the constant window title");
         expect(invoke(window, "selectEnglish"), "English slot is invokable");
         QSettings settings;
         expect(settings.value(QStringLiteral("ui/language")).toString()
@@ -368,13 +362,8 @@ void testLanguagePersistenceAndLocaleDefault()
     {
         auto* router = new FakeRouter;
         MainWindow window(router, nullptr);
-        const bool systemIsChinese = QLocale::system().language() == QLocale::Chinese;
-        const QString sourceTitle = QStringLiteral("AudioMonitor - Audio monitoring and forwarding");
-        const QString expectedTitle = systemIsChinese
-            ? QCoreApplication::translate("MainWindow", "AudioMonitor - Audio monitoring and forwarding")
-            : sourceTitle;
-        expect(window.windowTitle() == expectedTitle,
-               "missing language setting follows the system locale");
+        expect(window.windowTitle() == QStringLiteral("Audio Monitor"),
+               "missing language setting keeps the constant window title");
     }
 
     setLanguageSetting(QStringLiteral("en"));

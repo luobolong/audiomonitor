@@ -106,7 +106,8 @@ ctest --test-dir build -C Release --output-on-failure
 
 分发时可用 `windeployqt build\Release\audiomonitor.exe` 收集 Qt 运行库。
 GitHub Actions 的 Windows 构建产物将程序和所需 Qt/MSVC DLL 放在同一个
-`audiomonitor-windows` 顶层目录中；请完整下载并解压后运行。
+`audiomonitor-windows` 顶层目录中；请完整下载并解压后运行。发布版额外提供
+`audiomonitor-<版本>-windows-x64.zip` 便携包，解压后直接运行，无需安装。
 
 ## 使用
 
@@ -153,7 +154,7 @@ Windows 的有界 RingBuffer 在空间不足时丢弃无法容纳的新帧并发
 src/
   main.cpp                入口与命令行辅助模式
   mainwindow.{h,cpp}      主窗口、系统托盘和设置持久化
-  appicon.{h,cpp}         程序化绘制图标
+  appicon.{h,cpp}         应用图标（resources/icons/ 下的二进制 PNG，经 Qt 资源嵌入）
   core/
     audiorouter.{h,cpp}   引擎抽象接口与工厂
     ringbuffer.h          Windows WASAPI 路径的有界 SPSC RingBuffer
@@ -163,11 +164,12 @@ src/
 
 ## 分发与 CI
 
-标签（格式为 `vX.Y.Z`）发布工作流生成 `.deb`、`.rpm`、`.tar.gz`、`.AppImage`、Arch
-`.pkg.tar.zst` 和对应的 `PKGBUILD`，并附带 `SHA256SUMS`。Nix/NixOS 使用
-仓库中的 `flake.nix` 或 `default.nix` 从源代码构建，不作为发布二进制附件。
-通用包及 AppImage 仍依赖主机提供正在运行的 PipeWire 服务；包格式不会替代
-系统音频图。发行版依赖和兼容性说明见 [.github/PACKAGING.md](.github/PACKAGING.md)。
+标签（格式为 `vX.Y.Z`）发布工作流生成 `.deb`、`.rpm`、`.tar.gz`、`.AppImage`
+和 Windows 便携版 zip（`audiomonitor-<版本>-windows-x64.zip`），并附带
+`SHA256SUMS`。Nix/NixOS 使用仓库中的 `flake.nix` 或 `default.nix` 从源代码
+构建，不作为发布二进制附件。Linux 通用包及 AppImage 仍依赖主机提供正在运行
+的 PipeWire 服务；包格式不会替代系统音频图。发行版依赖和兼容性说明见
+[.github/PACKAGING.md](.github/PACKAGING.md)。
 
 - `.github/workflows/build.yml` 在 Ubuntu 24.04（Qt 6 + `libpipewire-0.3-dev`）和 Windows 上构建并运行测试。
 - `.github/workflows/release.yml` 在标签构建时运行 Linux 测试并生成发布包。

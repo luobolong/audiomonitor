@@ -473,11 +473,6 @@
 <context>
     <name>MainWindow</name>
     <message>
-        <location filename="../src/mainwindow.cpp" line="283"/>
-        <source>AudioMonitor - Audio monitoring and forwarding</source>
-        <translation>AudioMonitor - 音频监听与转发</translation>
-    </message>
-    <message>
         <location filename="../src/mainwindow.cpp" line="285"/>
         <source>Listen source (output device):</source>
         <translation>监听源（输出设备）：</translation>

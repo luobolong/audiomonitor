@@ -1,0 +1,11 @@
+<RCC>
+    <qresource prefix="/">
+        <file alias="appicon_16.png">icons/appicon_16.png</file>
+        <file alias="appicon_24.png">icons/appicon_24.png</file>
+        <file alias="appicon_32.png">icons/appicon_32.png</file>
+        <file alias="appicon_48.png">icons/appicon_48.png</file>
+        <file alias="appicon_64.png">icons/appicon_64.png</file>
+        <file alias="appicon_128.png">icons/appicon_128.png</file>
+        <file alias="appicon_256.png">icons/appicon_256.png</file>
+    </qresource>
+</RCC>

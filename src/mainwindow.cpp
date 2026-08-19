@@ -175,10 +175,11 @@ void MainWindow::buildUi()
     m_trayMenu->addAction(m_trayShow);
     m_trayMenu->addAction(m_trayStartStop);
     m_trayMenu->addSeparator();
-    m_trayQuit = new QAction(this);
-    m_trayMenu->addAction(m_trayQuit);
     m_languageMenu = new QMenu(this);
     m_trayMenu->addMenu(m_languageMenu);
+    m_trayMenu->addSeparator();
+    m_trayQuit = new QAction(this);
+    m_trayMenu->addAction(m_trayQuit);
     m_languageGroup = new QActionGroup(this);
     m_languageGroup->setExclusive(true);
     m_languageEnglish = new QAction(this);
@@ -280,7 +281,7 @@ void MainWindow::updateLanguageActions()
 
 void MainWindow::retranslateUi()
 {
-    setWindowTitle(tr("AudioMonitor - Audio monitoring and forwarding"));
+    setWindowTitle(QStringLiteral("Audio Monitor"));
     if (m_sourceTitle)
         m_sourceTitle->setText(tr("Listen source (output device):"));
     if (m_targetTitle)
@@ -633,14 +634,6 @@ void MainWindow::showMainWindow()
 void MainWindow::hideToTray()
 {
     hide();
-    if (!m_trayMessageShown) {
-        m_trayMessageShown = true;
-        if (m_tray && QSystemTrayIcon::supportsMessages()) {
-            m_tray->showMessage(tr("AudioMonitor"),
-                                tr("The window was minimized to the system tray; monitoring continues in the background."),
-                                QSystemTrayIcon::Information, 3000);
-        }
-    }
 }
 
 void MainWindow::quitApp()

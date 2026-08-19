@@ -131,51 +131,100 @@ jobs:
           name: appimage-package
           path: audiomonitor-*-x86_64.AppImage
 
-  package-arch:
-    name: Build Arch package
-    needs: build-linux
-    runs-on: ubuntu-24.04
-    container: archlinux:latest
+  package-windows:
+    name: Build and package Windows portable
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Arch build dependencies
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.*'
+          arch: win64_msvc2022_64
+          cache: true
+
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Stage portable bundle
+        shell: pwsh
         run: |
-          pacman -Syu --noconfirm
-          pacman -S --noconfirm base-devel git cmake ninja pkgconf qt6-base qt6-tools pipewire
+          $bundleDir = 'package/audiomonitor-windows'
+          cmake -E make_directory $bundleDir
+          cmake -E copy build/Release/audiomonitor.exe "$bundleDir/audiomonitor.exe"
 
-      - name: Build package with makepkg
+          # This Widgets-only application does not use OpenGL, D3D shaders,
+          # networking, SVG, external image codecs, or touch input plugins.
+          windeployqt --release --no-compiler-runtime --no-translations --no-opengl-sw --no-system-d3d-compiler --no-system-dxc-compiler --skip-plugin-types 'generic,iconengines,imageformats,networkinformation,tls' "$bundleDir/audiomonitor.exe"
+
+          # App-local CRT DLLs are much smaller than bundling vc_redist.x64.exe
+          # and keep the portable package runnable on a clean Windows install.
+          if (-not $env:VCToolsRedistDir) {
+            throw 'VCToolsRedistDir is not set by the MSVC environment'
+          }
+          $crtRoot = Join-Path $env:VCToolsRedistDir 'x64'
+          $crtDirs = @(Get-ChildItem -LiteralPath $crtRoot -Directory `
+            -Filter 'Microsoft.VC*.CRT' -ErrorAction SilentlyContinue)
+          if ($crtDirs.Count -eq 0) {
+            throw "MSVC runtime directory not found below: $crtRoot"
+          }
+          $crtDir = $crtDirs | Sort-Object -Property Name -Descending |
+            Select-Object -First 1
+          Write-Host "Using MSVC runtime: $($crtDir.FullName)"
+          Get-ChildItem -LiteralPath $crtDir.FullName -Filter '*.dll' -File |
+            Copy-Item -Destination $bundleDir
+
+      - name: Verify package
+        shell: pwsh
         run: |
-          VERSION="${APP_VERSION#v}"
-          mkdir -p arch-build release-output
-          cp packaging/PKGBUILD arch-build/PKGBUILD
-          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" arch-build/PKGBUILD
+          $bundleDir = 'package/audiomonitor-windows'
+          $required = @(
+            "$bundleDir/audiomonitor.exe",
+            "$bundleDir/Qt6Core.dll",
+            "$bundleDir/Qt6Gui.dll",
+            "$bundleDir/Qt6Widgets.dll",
+            "$bundleDir/platforms/qwindows.dll",
+            "$bundleDir/msvcp140.dll",
+            "$bundleDir/vcruntime140.dll"
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "Missing deployed file: $path"
+            }
+          }
 
-          # Manual runs may package a branch without a corresponding tag.
-          # Feed makepkg a local source archive while leaving the published
-          # PKGBUILD in its normal tag-based form.
-          if [[ "${GITHUB_REF_TYPE}" != tag ]]; then
-            SOURCE_ARCHIVE="audiomonitor-${VERSION}.tar.gz"
-            git archive --format=tar.gz --prefix="audiomonitor-${VERSION}/" \
-              --output="arch-build/${SOURCE_ARCHIVE}" HEAD
-            SOURCE_SHA256=$(sha256sum "arch-build/${SOURCE_ARCHIVE}" | cut -d' ' -f1)
-            sed -i "s|^source=.*|source=(\"${SOURCE_ARCHIVE}\")|" arch-build/PKGBUILD
-            sed -i "s|^sha256sums=.*|sha256sums=('${SOURCE_SHA256}')|" arch-build/PKGBUILD
-          fi
+          $process = Start-Process -FilePath "$bundleDir/audiomonitor.exe" `
+            -ArgumentList '--smoke-test', '500' -PassThru -Wait
+          if ($process.ExitCode -ne 0) {
+            throw "Packaged application exited with code $($process.ExitCode)"
+          }
 
-          cp packaging/PKGBUILD release-output/PKGBUILD
-          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" release-output/PKGBUILD
-          useradd --create-home builder
-          chown -R builder:builder arch-build
-          (cd arch-build && runuser -u builder -- makepkg --cleanbuild --nodeps --noconfirm)
-          cp arch-build/audiomonitor-*.pkg.tar.zst release-output/
-          pacman -Qip release-output/*.pkg.tar.zst
+      - name: Create portable zip
+        shell: pwsh
+        run: |
+          $version = $env:APP_VERSION.TrimStart('v')
+          $zipName = "audiomonitor-${version}-windows-x64.zip"
+          Compress-Archive -Path 'package/audiomonitor-windows' `
+            -DestinationPath $zipName -CompressionLevel Optimal
+          Get-Item $zipName | Select-Object Name, Length
 
-      - name: Upload Arch artifacts
+      - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: arch-package
-          path: release-output/*
+          name: windows-package
+          path: |
+            audiomonitor-*-windows-x64.zip
+            package/
 
   check-nix:
     name: Check Nix package
@@ -190,7 +239,7 @@ jobs:
 
   create-release:
     name: Publish release assets
-    needs: [build-linux, package-appimage, package-arch, check-nix]
+    needs: [build-linux, package-appimage, package-windows, check-nix]
     runs-on: ubuntu-24.04
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
@@ -198,7 +247,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download Linux package artifacts
+      - name: Download package artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: '*-package'
@@ -210,7 +259,7 @@ jobs:
           mkdir -p release-assets
           find downloaded-packages -type f \( \
             -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' \
-            -o -name '*.AppImage' -o -name '*.pkg.tar.zst' -o -name 'PKGBUILD' \
+            -o -name '*.AppImage' -o -name '*.zip' \
           \) -exec cp {} release-assets/ \;
           (cd release-assets && sha256sum * > SHA256SUMS)
           ls -lh release-assets
@@ -221,11 +270,13 @@ jobs:
           cat > release-notes.md << EOF
           # AudioMonitor ${VERSION}
 
-          Linux assets include Debian (.deb), RPM (.rpm), generic binary (.tar.gz),
-          AppImage, and Arch Linux (.pkg.tar.zst plus PKGBUILD) packages.
+          Assets include Debian (.deb), RPM (.rpm), generic Linux binary (.tar.gz),
+          AppImage, and a Windows portable zip (.zip).
 
           All Linux packages require a running PipeWire graph and session manager.
           The AppImage bundles Qt but intentionally uses the host PipeWire client.
+          The Windows zip bundles Qt and the MSVC runtime and runs without
+          installation on Windows 10/11.
           Nix users can build directly with:
 
           \`\`\`sh

@@ -102,6 +102,12 @@ cp -a "$STAGE_DIR/." %{buildroot}/
 %doc /usr/share/doc/audiomonitor/README.md
 %{_bindir}/audiomonitor
 %{_datadir}/applications/audiomonitor.desktop
+%{_datadir}/icons/hicolor/16x16/apps/audiomonitor.png
+%{_datadir}/icons/hicolor/24x24/apps/audiomonitor.png
+%{_datadir}/icons/hicolor/32x32/apps/audiomonitor.png
+%{_datadir}/icons/hicolor/48x48/apps/audiomonitor.png
+%{_datadir}/icons/hicolor/64x64/apps/audiomonitor.png
+%{_datadir}/icons/hicolor/128x128/apps/audiomonitor.png
 %{_datadir}/icons/hicolor/256x256/apps/audiomonitor.png
 %dir %{_datadir}/audiomonitor
 %dir %{_datadir}/audiomonitor/translations

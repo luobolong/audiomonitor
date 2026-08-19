@@ -49,19 +49,11 @@ case "$FORMAT" in
     deb|rpm|tar|tar.gz|all)
         "$SCRIPT_DIR/package-linux.sh" 1.0.0 "$BUILD_DIR" "$OUTPUT_DIR" "$FORMAT"
         ;;
-    arch)
-        if command -v makepkg >/dev/null 2>&1; then
-            makepkg --printsrcinfo -p "$SCRIPT_DIR/PKGBUILD" > "$OUTPUT_DIR/.SRCINFO"
-            printf 'Arch PKGBUILD metadata is valid.\n'
-        else
-            printf 'makepkg is unavailable; run this check in an Arch container.\n' >&2
-        fi
-        ;;
     appimage)
         printf 'AppImage creation runs in the release workflow with linuxdeploy.\n'
         ;;
     *)
-        printf 'Usage: %s [deb|rpm|tar|arch|appimage|all] [build-dir] [output-dir]\n' "$0" >&2
+        printf 'Usage: %s [deb|rpm|tar|appimage|all] [build-dir] [output-dir]\n' "$0" >&2
         exit 2
         ;;
 esac
