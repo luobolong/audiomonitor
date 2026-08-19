@@ -107,7 +107,9 @@ ctest --test-dir build -C Release --output-on-failure
 分发时可用 `windeployqt build\Release\audiomonitor.exe` 收集 Qt 运行库。
 GitHub Actions 的 Windows 构建产物将程序和所需 Qt/MSVC DLL 放在同一个
 `audiomonitor-windows` 顶层目录中；请完整下载并解压后运行。发布版额外提供
-`audiomonitor-<版本>-windows-x64.zip` 便携包，解压后直接运行，无需安装。
+`audiomonitor-<版本>-windows-x64.zip` 便携包（解压即用，无需安装）和
+`audiomonitor-<版本>-windows-x64.msi` 安装程序（安装到 Program Files，
+带开始菜单和桌面快捷方式，支持升级覆盖安装）。
 
 ## 使用
 
@@ -165,8 +167,8 @@ src/
 ## 分发与 CI
 
 标签（格式为 `vX.Y.Z`）发布工作流生成 `.deb`、`.rpm`、`.tar.gz`、`.AppImage`
-和 Windows 便携版 zip（`audiomonitor-<版本>-windows-x64.zip`），并附带
-`SHA256SUMS`。Nix/NixOS 使用仓库中的 `flake.nix` 或 `default.nix` 从源代码
+和 Windows 安装包（便携版 zip 与 MSI），并附带 `SHA256SUMS`。Nix/NixOS
+使用仓库中的 `flake.nix` 或 `default.nix` 从源代码
 构建，不作为发布二进制附件。Linux 通用包及 AppImage 仍依赖主机提供正在运行
 的 PipeWire 服务；包格式不会替代系统音频图。发行版依赖和兼容性说明见
 [.github/PACKAGING.md](.github/PACKAGING.md)。

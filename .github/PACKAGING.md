@@ -4,7 +4,7 @@ Release packaging is driven by `.github/workflows/release.yml`. The workflow
 builds and tests one Ubuntu 24.04 CMake tree, stages the install tree once,
 and reuses it for the Linux binary package formats. A separate Windows job
 builds with Qt 6 + MSVC, deploys the Qt runtime with `windeployqt`, bundles
-the MSVC CRT, and publishes a portable zip.
+the MSVC CRT, and publishes a portable zip plus an MSI installer.
 
 ## Release artifacts
 
@@ -16,6 +16,9 @@ Numeric `vX.Y.Z` tags publish:
 - `audiomonitor-<version>-x86_64.AppImage` with Qt bundled by linuxdeploy.
 - `audiomonitor-<version>-windows-x64.zip` — a portable Windows bundle with
   the application, Qt 6 runtime DLLs and platform plugin, and the MSVC CRT.
+- `audiomonitor-<version>-windows-x64.msi` — a WiX MSI installer for
+  Windows 10/11 x64 that installs into Program Files with Start-menu and
+  desktop shortcuts.
 - `SHA256SUMS` for the published files.
 
 Manual workflow runs require an explicit numeric `X.Y.Z` package version.
@@ -89,6 +92,20 @@ windeployqt --release --no-compiler-runtime --no-translations \
 
 then copy the MSVC CRT DLLs (from `%VCToolsRedistDir%\x64\Microsoft.VC*.CRT`)
 next to the executable and zip the folder.
+
+To build the MSI locally, deploy the bundle into `build/deploy` (the same
+files as the portable zip), put the WiX Toolset v3 binaries on `PATH`, and
+run:
+
+```sh
+cpack --config build/CPackConfig.cmake -G WIX -C Release
+```
+
+CPack generates the WiX source from the CMake install rules, so the file list
+always matches the deployed bundle. The installer installs into Program
+Files, registers an uninstaller, and creates Start-menu and desktop
+shortcuts; the fixed upgrade GUID in `CMakeLists.txt` lets later versions
+upgrade previous installs.
 
 `packaging/stage-linux.sh` is the common Linux staging entry point. It
 installs via CMake, adds the desktop entry, documentation, the binary PNG

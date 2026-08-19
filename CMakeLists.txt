@@ -135,10 +135,19 @@ endif()
 
 # For packaging (use windeployqt on Windows):
 #   cmake --install build --prefix dist
-install(TARGETS audiomonitor
-    RUNTIME DESTINATION bin
-    BUNDLE DESTINATION bin
-)
+if(WIN32)
+    # The Windows MSI packages the windeployqt-staged bundle as a whole.
+    # The release workflow deploys Qt runtime DLLs, plugins, and the MSVC
+    # CRT into ${CMAKE_CURRENT_BINARY_DIR}/deploy before invoking CPack.
+    install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/deploy/"
+        DESTINATION "."
+    )
+else()
+    install(TARGETS audiomonitor
+        RUNTIME DESTINATION bin
+        BUNDLE DESTINATION bin
+    )
+endif()
 
 if(BUILD_TESTING)
     add_executable(realtime_audio_tests
@@ -163,4 +172,25 @@ if(BUILD_TESTING)
     add_test(NAME ringbuffer COMMAND ringbuffer_tests)
 
     add_test(NAME mainwindow COMMAND mainwindow_tests)
+endif()
+
+# Windows MSI installer via CPack/WiX. `cpack -G WIX` requires the WiX
+# Toolset v3 (candle/light) on PATH; the release workflow downloads it.
+if(WIN32)
+    set(CPACK_GENERATOR "WIX")
+    set(CPACK_PACKAGE_NAME "AudioMonitor")
+    set(CPACK_PACKAGE_VENDOR "AudioMonitor")
+    set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+    set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
+        "Audio monitoring and forwarding tool")
+    set(CPACK_PACKAGE_INSTALL_DIRECTORY "AudioMonitor")
+    # Fixed GUID so MSI upgrades replace previous installs.
+    set(CPACK_WIX_UPGRADE_GUID "{7BE43D4E-DF0C-4338-B386-CA250F27F394}")
+    # Start-menu and desktop shortcuts plus the Add/Remove Programs icon.
+    set(CPACK_PACKAGE_EXECUTABLES "audiomonitor" "AudioMonitor")
+    set(CPACK_CREATE_DESKTOP_LINKS "audiomonitor")
+    set(CPACK_WIX_PROGRAM_MENU_FOLDER "AudioMonitor")
+    set(CPACK_WIX_PRODUCT_ICON
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/windows/audiomonitor.ico")
+    include(CPack)
 endif()

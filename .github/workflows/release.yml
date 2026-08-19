@@ -218,11 +218,41 @@ jobs:
             -DestinationPath $zipName -CompressionLevel Optimal
           Get-Item $zipName | Select-Object Name, Length
 
-      - name: Upload Windows artifact
+      - name: Install WiX Toolset
+        shell: pwsh
+        run: |
+          $wixDir = Join-Path $env:RUNNER_TEMP 'wix314'
+          New-Item -ItemType Directory -Force -Path $wixDir | Out-Null
+          $zip = Join-Path $env:RUNNER_TEMP 'wix314-binaries.zip'
+          Invoke-WebRequest -Uri 'https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip' -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $wixDir -Force
+          "WIX_DIR=$wixDir" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Build MSI installer
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:WIX_DIR;$env:PATH"
+          # Reuse the verified bundle (exe + Qt runtime + CRT) as the payload.
+          cmake -E remove_directory build/deploy
+          cmake -E copy_directory package/audiomonitor-windows build/deploy
+          cpack --config build/CPackConfig.cmake -B build/msi -G WIX -C Release
+          $version = $env:APP_VERSION.TrimStart('v')
+          $msiName = "audiomonitor-${version}-windows-x64.msi"
+          $msi = Get-ChildItem -Path 'build/msi' -Filter '*.msi' |
+            Select-Object -First 1
+          if (-not $msi) {
+            throw 'CPack did not produce an MSI package'
+          }
+          Move-Item -LiteralPath $msi.FullName -Destination $msiName -Force
+          Get-Item $msiName | Select-Object Name, Length
+
+      - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
           name: windows-package
-          path: audiomonitor-*-windows-x64.zip
+          path: |
+            audiomonitor-*-windows-x64.zip
+            audiomonitor-*-windows-x64.msi
 
   check-nix:
     name: Check Nix package
@@ -257,7 +287,7 @@ jobs:
           mkdir -p release-assets
           find downloaded-packages -type f \( \
             -name '*.deb' -o -name '*.rpm' -o -name '*.tar.gz' \
-            -o -name '*.AppImage' -o -name '*.zip' \
+            -o -name '*.AppImage' -o -name '*.zip' -o -name '*.msi' \
           \) -exec cp {} release-assets/ \;
           (cd release-assets && sha256sum * > SHA256SUMS)
           ls -lh release-assets
@@ -269,12 +299,13 @@ jobs:
           # AudioMonitor ${VERSION}
 
           Assets include Debian (.deb), RPM (.rpm), generic Linux binary (.tar.gz),
-          AppImage, and a Windows portable zip (.zip).
+          AppImage, and Windows installers (portable .zip and .msi).
 
           All Linux packages require a running PipeWire graph and session manager.
           The AppImage bundles Qt but intentionally uses the host PipeWire client.
           The Windows zip bundles Qt and the MSVC runtime and runs without
-          installation on Windows 10/11.
+          installation on Windows 10/11; the MSI installs AudioMonitor into
+          Program Files with Start-menu and desktop shortcuts.
           Nix users can build directly with:
 
           \`\`\`sh
