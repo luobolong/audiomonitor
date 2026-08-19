@@ -24,7 +24,7 @@ Numeric `vX.Y.Z` tags publish:
 Manual workflow runs require an explicit numeric `X.Y.Z` package version.
 
 Nix is source-based rather than a release asset. The flake and classic
-`default.nix` expression are checked in CI and can be built with:
+`default.nix` expression can be built locally with:
 
 ```sh
 nix build .#audiomonitor

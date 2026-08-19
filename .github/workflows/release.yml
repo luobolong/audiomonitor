@@ -254,20 +254,9 @@ jobs:
             audiomonitor-*-windows-x64.zip
             audiomonitor-*-windows-x64.msi
 
-  check-nix:
-    name: Check Nix package
-    needs: build-linux
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/magic-nix-cache-action@v8
-      - name: Build Nix package
-        run: nix build .#audiomonitor --no-link
-
   create-release:
     name: Publish release assets
-    needs: [build-linux, package-appimage, package-windows, check-nix]
+    needs: [build-linux, package-appimage, package-windows]
     runs-on: ubuntu-24.04
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
@@ -306,12 +295,6 @@ jobs:
           The Windows zip bundles Qt and the MSVC runtime and runs without
           installation on Windows 10/11; the MSI installs AudioMonitor into
           Program Files with Start-menu and desktop shortcuts.
-          Nix users can build directly with:
-
-          \`\`\`sh
-          nix build github:luobolong/audiomonitor/${APP_VERSION}
-          \`\`\`
-
           Verify downloaded assets with the accompanying SHA256SUMS file.
           EOF
 
