@@ -218,13 +218,11 @@ jobs:
             -DestinationPath $zipName -CompressionLevel Optimal
           Get-Item $zipName | Select-Object Name, Length
 
-      - name: Upload Windows artifacts
+      - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-package
-          path: |
-            audiomonitor-*-windows-x64.zip
-            package/
+          path: audiomonitor-*-windows-x64.zip
 
   check-nix:
     name: Check Nix package
