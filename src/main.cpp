@@ -79,7 +79,6 @@ int main(int argc, char* argv[])
 
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("AudioMonitor"));
-    app.setApplicationDisplayName(QStringLiteral("AudioMonitor"));
     app.setOrganizationName(QStringLiteral("AudioMonitor"));
     app.setQuitOnLastWindowClosed(false); // Keep running in the tray after the window closes.
     app.setWindowIcon(makeAppIcon());
