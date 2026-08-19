@@ -370,15 +370,15 @@ private:
     const size_t m_maxRequestFrames;
     std::vector<float> m_buf;
 
-    // Each shared or ownership-crossing state word starts on its own
-    // 64-byte-aligned region to avoid false sharing on architectures with
-    // conventional 64-byte cache lines. m_read and m_consumerGeneration are
-    // consumer-owned (the producer only reads m_read); m_write and
-    // m_discontinuityGeneration are producer-owned (the consumer only reads
-    // them).
+    // Shared cursor/generation groups start on separate 64-byte-aligned
+    // regions to avoid false sharing on architectures with conventional
+    // 64-byte cache lines. m_read and m_consumerGeneration are consumer-owned
+    // (the producer only reads m_read), so they share one cache line; m_write
+    // and m_discontinuityGeneration are producer-owned (the consumer only
+    // reads them) and each starts on its own cache line.
     static constexpr size_t kCacheLineBytes = 64;
     alignas(kCacheLineBytes) std::atomic<uint64_t> m_read{0};
-    alignas(kCacheLineBytes) uint64_t m_consumerGeneration = 0;
+    uint64_t m_consumerGeneration = 0;
     alignas(kCacheLineBytes) std::atomic<uint64_t> m_write{0};
     alignas(kCacheLineBytes) std::atomic<uint64_t> m_discontinuityGeneration{0};
 };
