@@ -1,0 +1,71 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-msvc",
+      "displayName": "Windows MSVC 2022 + Qt 6.8",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/vscode-msvc",
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": {
+          "type": "PATH",
+          "value": "${sourceDir}/qt/6.8.0/msvc2022_64"
+        },
+        "BUILD_TESTING": {
+          "type": "BOOL",
+          "value": "ON"
+        }
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-debug",
+      "displayName": "Windows Debug",
+      "configurePreset": "windows-msvc",
+      "configuration": "Debug"
+    },
+    {
+      "name": "windows-release",
+      "displayName": "Windows Release",
+      "configurePreset": "windows-msvc",
+      "configuration": "Release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "windows-debug",
+      "displayName": "Windows Debug Tests",
+      "configurePreset": "windows-msvc",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "PATH": "${sourceDir}/qt/6.8.0/msvc2022_64/bin;$penv{PATH}",
+        "QT_PLUGIN_PATH": "${sourceDir}/qt/6.8.0/msvc2022_64/plugins",
+        "QT_QPA_PLATFORM": "offscreen"
+      }
+    },
+    {
+      "name": "windows-release",
+      "displayName": "Windows Release Tests",
+      "configurePreset": "windows-msvc",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "PATH": "${sourceDir}/qt/6.8.0/msvc2022_64/bin;$penv{PATH}",
+        "QT_PLUGIN_PATH": "${sourceDir}/qt/6.8.0/msvc2022_64/plugins",
+        "QT_QPA_PLATFORM": "offscreen"
+      }
+    }
+  ]
+}

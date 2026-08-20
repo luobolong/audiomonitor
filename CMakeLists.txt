@@ -30,6 +30,11 @@ set(AUDIOMONITOR_SOURCES
 # RingBuffer only used on Windows
 if(WIN32)
     list(APPEND AUDIOMONITOR_SOURCES src/core/ringbuffer.h)
+
+    # Embed the same multi-size icon used by the Qt window and tray into the
+    # Windows executable so Explorer and shortcuts display the app icon too.
+    set(AUDIOMONITOR_WINDOWS_ICON
+        "${CMAKE_CURRENT_SOURCE_DIR}/resources/icons/appicon.ico")
 endif()
 
 if(WIN32)
@@ -51,6 +56,12 @@ endif()
 
 # WIN32: Windows GUI subsystem (no console window).
 add_executable(audiomonitor WIN32 ${AUDIOMONITOR_SOURCES})
+
+if(WIN32)
+    target_sources(audiomonitor PRIVATE resources/icons/appicon.rc)
+    set_source_files_properties(resources/icons/appicon.rc PROPERTIES
+        OBJECT_DEPENDS "${AUDIOMONITOR_WINDOWS_ICON}")
+endif()
 
 target_include_directories(audiomonitor PRIVATE src)
 target_link_libraries(audiomonitor PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
@@ -191,6 +202,6 @@ if(WIN32)
     set(CPACK_CREATE_DESKTOP_LINKS "audiomonitor")
     set(CPACK_WIX_PROGRAM_MENU_FOLDER "AudioMonitor")
     set(CPACK_WIX_PRODUCT_ICON
-        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/windows/audiomonitor.ico")
+        "${AUDIOMONITOR_WINDOWS_ICON}")
     include(CPack)
 endif()

@@ -42,7 +42,11 @@ ui_*.h
 .qmake.stash
 
 # ===== Editors / IDEs =====
-.vscode/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/settings.json
+!.vscode/tasks.json
 .idea/
 .cache/
 .clangd/
