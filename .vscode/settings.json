@@ -1,0 +1,30 @@
+{
+  "cmake.useCMakePresets": "always",
+  "cmake.configureOnOpen": true,
+  "cmake.configureOnEdit": true,
+  "cmake.buildBeforeRun": true,
+  "cmake.saveBeforeBuild": true,
+  "cmake.ctest.testExplorerIntegrationEnabled": true,
+  "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+  "C_Cpp.default.cppStandard": "c++17",
+  "qt-core.qtInstallationRoot": "${workspaceFolder}/qt",
+  "qt-core.additionalQtPaths": [
+    "${workspaceFolder}/qt/6.8.0/msvc2022_64/bin/qtpaths.exe"
+  ],
+  "qt-core.doNotAskForDefaultQtInstallationRoot": true,
+  "qt-cpp.doNotAskForCMakePath": true,
+  "files.exclude": {
+    "**/.git": true,
+    "**/build": true,
+    "**/qt": true
+  },
+  "search.exclude": {
+    "**/build": true,
+    "**/qt": true
+  },
+  "[cpp]": {
+    "editor.defaultFormatter": "ms-vscode.cpptools",
+    "editor.insertSpaces": true,
+    "editor.tabSize": 4
+  }
+}

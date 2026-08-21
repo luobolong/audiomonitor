@@ -141,6 +141,18 @@ public:
         return m_capacity - bufferedFrames();
     }
 
+    // Consumer-only occupancy snapshot. Unlike bufferedFrames(), this uses
+    // the consumer-owned read cursor and one acquire load of the producer's
+    // published write cursor, so it may safely guide consumer-side latency
+    // control. It does not consume frames or acknowledge a discontinuity.
+    size_t consumerBufferedFrames() const noexcept
+    {
+        const uint64_t r = m_read.load(std::memory_order_relaxed);
+        const uint64_t w = m_write.load(std::memory_order_acquire);
+        const uint64_t used = w - r;
+        return static_cast<size_t>(std::min<uint64_t>(used, m_capacity));
+    }
+
     // Diagnostic cursor snapshots. Like the occupancy snapshots above, these
     // are approximate and must not drive synchronization.
     uint64_t consumerCursor() const noexcept
@@ -253,7 +265,12 @@ public:
         const size_t firstSamples =
             std::min(totalSamples, m_buf.size() - readOffsetSamples);
 
-        if (volume == 1.0f) {
+        if (volume == 0.0f) {
+            // Muted monitoring still consumes the queue, but it need not
+            // touch the source samples. This keeps the common mute path as a
+            // bounded memset while preserving cursor/discontinuity handling.
+            zero(dst, totalSamples);
+        } else if (volume == 1.0f) {
             if (firstSamples != 0) {
                 std::memcpy(dst, m_buf.data() + readOffsetSamples,
                             firstSamples * sizeof(float));

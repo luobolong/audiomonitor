@@ -420,6 +420,11 @@
         <translation>无法获取播放客户端（%1）</translation>
     </message>
     <message>
+        <location filename="../src/core/audiorouter_win.cpp" line="882"/>
+        <source>Unable to create the adaptive audio reader: %1</source>
+        <translation>无法创建自适应音频读取器：%1</translation>
+    </message>
+    <message>
         <location filename="../src/core/audiorouter_win.cpp" line="840"/>
         <source>Unable to start rendering (%1)</source>
         <translation>无法启动播放（%1）</translation>

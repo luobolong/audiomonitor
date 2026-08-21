@@ -29,7 +29,10 @@ set(AUDIOMONITOR_SOURCES
 
 # RingBuffer only used on Windows
 if(WIN32)
-    list(APPEND AUDIOMONITOR_SOURCES src/core/ringbuffer.h)
+    list(APPEND AUDIOMONITOR_SOURCES
+        src/core/adaptive_audio_buffer.h
+        src/core/ringbuffer.h
+    )
 
     # Embed the same multi-size icon used by the Qt window and tray into the
     # Windows executable so Explorer and shortcuts display the app icon too.
@@ -181,6 +184,15 @@ if(BUILD_TESTING)
     target_link_libraries(ringbuffer_tests PRIVATE Threads::Threads)
     set_target_properties(ringbuffer_tests PROPERTIES AUTOMOC OFF)
     add_test(NAME ringbuffer COMMAND ringbuffer_tests)
+
+    add_executable(adaptive_audio_buffer_tests
+        tests/adaptive_audio_buffer_test.cpp
+        src/core/adaptive_audio_buffer.h
+        src/core/ringbuffer.h
+    )
+    target_include_directories(adaptive_audio_buffer_tests PRIVATE src)
+    set_target_properties(adaptive_audio_buffer_tests PROPERTIES AUTOMOC OFF)
+    add_test(NAME adaptive_audio_buffer COMMAND adaptive_audio_buffer_tests)
 
     add_test(NAME mainwindow COMMAND mainwindow_tests)
 endif()

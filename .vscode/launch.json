@@ -1,0 +1,69 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "AudioMonitor (Debug)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/vscode-msvc/Debug/audiomonitor.exe",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [
+        {
+          "name": "PATH",
+          "value": "${workspaceFolder}/qt/6.8.0/msvc2022_64/bin;${env:PATH}"
+        },
+        {
+          "name": "QT_PLUGIN_PATH",
+          "value": "${workspaceFolder}/qt/6.8.0/msvc2022_64/plugins"
+        }
+      ],
+      "preLaunchTask": "CMake: build Debug"
+    },
+    {
+      "name": "AudioMonitor --list-devices",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/vscode-msvc/Debug/audiomonitor.exe",
+      "args": ["--list-devices"],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [
+        {
+          "name": "PATH",
+          "value": "${workspaceFolder}/qt/6.8.0/msvc2022_64/bin;${env:PATH}"
+        },
+        {
+          "name": "QT_PLUGIN_PATH",
+          "value": "${workspaceFolder}/qt/6.8.0/msvc2022_64/plugins"
+        }
+      ],
+      "preLaunchTask": "CMake: build Debug"
+    },
+    {
+      "name": "mainwindow_tests (Debug)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/vscode-msvc/Debug/mainwindow_tests.exe",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [
+        {
+          "name": "PATH",
+          "value": "${workspaceFolder}/qt/6.8.0/msvc2022_64/bin;${env:PATH}"
+        },
+        {
+          "name": "QT_PLUGIN_PATH",
+          "value": "${workspaceFolder}/qt/6.8.0/msvc2022_64/plugins"
+        },
+        {
+          "name": "QT_QPA_PLATFORM",
+          "value": "offscreen"
+        }
+      ],
+      "preLaunchTask": "CMake: build Debug"
+    }
+  ]
+}
