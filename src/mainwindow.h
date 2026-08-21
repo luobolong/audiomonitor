@@ -45,6 +45,8 @@ private slots:
     void quitApp();
     void selectEnglish();
     void selectSimplifiedChinese();
+    void selectLowLatencyMode();
+    void selectStableMode();
 
 private:
     void buildUi();
@@ -62,6 +64,8 @@ private:
     QString defaultLanguage() const;
     bool installLanguage(const QString& language, bool persist);
     void updateLanguageActions();
+    void applyMonitoringMode(MonitoringMode mode, bool persist);
+    void updateMonitoringModeActions();
     void updateReconnectStatus();
     void applyVolumeValue(int value);
 
@@ -88,6 +92,10 @@ private:
     QAction* m_languageEnglish = nullptr;
     QAction* m_languageChinese = nullptr;
     QActionGroup* m_languageGroup = nullptr;
+    QMenu* m_monitoringModeMenu = nullptr;
+    QAction* m_lowLatencyMode = nullptr;
+    QAction* m_stableMode = nullptr;
+    QActionGroup* m_monitoringModeGroup = nullptr;
     QTranslator* m_translator = nullptr;
 
     bool m_running = false;
@@ -101,6 +109,7 @@ private:
     QString m_reconnectTargetId;
     QString m_lastError;
     QString m_languageCode;
+    MonitoringMode m_monitoringMode = MonitoringMode::Stable;
 
     // Saved selections applied after the first device refresh.
     QString m_savedSourceId;

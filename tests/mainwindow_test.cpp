@@ -44,6 +44,7 @@ public:
         QString sourceId;
         QString targetId;
         float volume = 0.0f;
+        MonitoringMode monitoringMode = MonitoringMode::Stable;
     };
 
     explicit FakeRouter(QObject* parent = nullptr)
@@ -55,7 +56,7 @@ public:
 
     bool start(const QString& sourceId, const QString& targetId, float volume) override
     {
-        requests.push_back({ sourceId, targetId, volume });
+        requests.push_back({ sourceId, targetId, volume, selectedMode });
         if (sourceId.isEmpty() || targetId.isEmpty() || sourceId == targetId)
             return false;
         m_sessionIds = { sourceId, targetId };
@@ -77,6 +78,13 @@ public:
     bool isRunning() const override { return m_running; }
     SessionDeviceIds lastSessionDeviceIds() const override { return m_sessionIds; }
     void setVolume(float volume) override { lastVolume = volume; }
+    bool supportsMonitoringModeSelection() const override { return true; }
+    MonitoringMode monitoringMode() const override { return selectedMode; }
+    void setMonitoringMode(MonitoringMode mode) override
+    {
+        selectedMode = mode;
+        ++modeSetCount;
+    }
 
     void refresh()
     {
@@ -92,7 +100,9 @@ public:
     QVector<DeviceInfo> devices;
     std::vector<StartRequest> requests;
     int stopCount = 0;
+    int modeSetCount = 0;
     float lastVolume = 1.0f;
+    MonitoringMode selectedMode = MonitoringMode::Stable;
 
 private:
     bool m_running = false;
@@ -173,6 +183,13 @@ void clearSavedDeviceSettings()
     settings.remove(QStringLiteral("source/name"));
     settings.remove(QStringLiteral("target/id"));
     settings.remove(QStringLiteral("target/name"));
+    settings.sync();
+}
+
+void clearMonitoringModeSetting()
+{
+    QSettings settings;
+    settings.remove(QStringLiteral("audio/monitoringMode"));
     settings.sync();
 }
 
@@ -339,6 +356,7 @@ void testLanguageSwitchUpdatesWidgetsAndTray()
     MainWindow window(router, nullptr);
     QComboBox* source = sourceBox(window);
     QMenu* menu = languageMenu(window, QStringLiteral("Language"));
+    QMenu* modeMenu = languageMenu(window, QStringLiteral("Monitoring mode"));
     expect(window.windowTitle() == QStringLiteral("Audio Monitor"),
            "English is applied from the explicit setting");
     expect(hasButtonText(window, QStringLiteral("Refresh devices")),
@@ -346,6 +364,7 @@ void testLanguageSwitchUpdatesWidgetsAndTray()
     expect(hasLabelText(window, QStringLiteral("Listen source (output device):")),
            "English label text is visible");
     expect(menu != nullptr, "English language menu is discoverable");
+    expect(modeMenu != nullptr, "English monitoring-mode menu is discoverable");
     expect(windowAction(window, QStringLiteral("Open main window")) != nullptr,
            "English tray action text is visible");
     expect(source && source->itemText(0) == QStringLiteral("Source A (default)"),
@@ -358,9 +377,11 @@ void testLanguageSwitchUpdatesWidgetsAndTray()
         "MainWindow", "Listen source (output device):");
     const QString translatedOpen = QCoreApplication::translate("MainWindow", "Open main window");
     const QString translatedLanguage = QCoreApplication::translate("MainWindow", "Language");
+    const QString translatedMode = QCoreApplication::translate("MainWindow", "Monitoring mode");
     const QString translatedChinese = QCoreApplication::translate("MainWindow", "Simplified Chinese");
     const QString translatedDefault = QCoreApplication::translate("MainWindow", " (default)");
     menu = languageMenu(window, translatedLanguage);
+    modeMenu = languageMenu(window, translatedMode);
     expect(window.windowTitle() == QStringLiteral("Audio Monitor"),
            "window title stays constant after switching to Simplified Chinese");
     expect(hasButtonText(window, translatedRefresh),
@@ -371,6 +392,7 @@ void testLanguageSwitchUpdatesWidgetsAndTray()
                && windowAction(window, translatedOpen) != nullptr,
            "tray action text changes immediately to Simplified Chinese");
     expect(menu != nullptr, "Simplified Chinese language menu is discoverable");
+    expect(modeMenu != nullptr, "monitoring-mode menu changes to Simplified Chinese");
     QAction* english = menuAction(menu, QStringLiteral("English"));
     QAction* chinese = menuAction(menu, translatedChinese);
     expect(english && chinese, "translated language actions are present");
@@ -380,6 +402,98 @@ void testLanguageSwitchUpdatesWidgetsAndTray()
            "default suffix changes without translating the device name");
     expect(source && source->itemText(0).contains(QStringLiteral("Source A")),
            "operating-system device names remain unchanged");
+}
+
+void testMonitoringModeSelectionAndPersistence()
+{
+    setLanguageSetting(QStringLiteral("en"));
+    clearSavedDeviceSettings();
+    clearMonitoringModeSetting();
+
+    {
+        auto* router = new FakeRouter;
+        router->devices = {
+            { QStringLiteral("source"), QStringLiteral("Source"), true },
+            { QStringLiteral("target"), QStringLiteral("Target"), false },
+        };
+        MainWindow window(router, nullptr);
+        QMenu* modeMenu = languageMenu(window, QStringLiteral("Monitoring mode"));
+        QAction* lowLatency = menuAction(modeMenu, QStringLiteral("Low latency"));
+        QAction* stable = menuAction(modeMenu, QStringLiteral("Stable"));
+        expect(modeMenu && lowLatency && stable,
+               "monitoring-mode menu contains both Windows policies");
+        expect(lowLatency && !lowLatency->isChecked() && stable && stable->isChecked(),
+               "stable mode is selected by default");
+        expect(router->selectedMode == MonitoringMode::Stable,
+               "default mode is applied to the router");
+
+        QSystemTrayIcon* tray = window.findChild<QSystemTrayIcon*>();
+        QMenu* trayMenu = tray ? tray->contextMenu() : nullptr;
+        int languageIndex = -1;
+        int modeIndex = -1;
+        int quitIndex = -1;
+        if (trayMenu) {
+            const QList<QAction*> actions = trayMenu->actions();
+            for (int i = 0; i < actions.size(); ++i) {
+                QAction* action = actions.at(i);
+                if (action->menu() && action->menu()->title() == QStringLiteral("Language"))
+                    languageIndex = i;
+                if (action->menu()
+                    && action->menu()->title() == QStringLiteral("Monitoring mode")) {
+                    modeIndex = i;
+                }
+                if (action->text() == QStringLiteral("Quit"))
+                    quitIndex = i;
+            }
+        }
+        expect(languageIndex >= 0 && modeIndex > languageIndex && quitIndex > modeIndex,
+               "monitoring mode is placed between language and quit");
+
+        expect(invoke(window, "selectLowLatencyMode"),
+               "low-latency mode slot is invokable");
+        expect(router->selectedMode == MonitoringMode::LowLatency,
+               "low-latency mode is applied to the router");
+        expect(lowLatency && lowLatency->isChecked() && stable && !stable->isChecked(),
+               "mode actions remain mutually exclusive");
+        QSettings settings;
+        expect(settings.value(QStringLiteral("audio/monitoringMode")).toString()
+                   == QStringLiteral("low_latency"),
+               "low-latency selection is persisted");
+    }
+
+    {
+        auto* router = new FakeRouter;
+        router->devices = {
+            { QStringLiteral("source"), QStringLiteral("Source"), true },
+            { QStringLiteral("target"), QStringLiteral("Target"), false },
+        };
+        MainWindow window(router, nullptr);
+        expect(router->selectedMode == MonitoringMode::LowLatency,
+               "persisted low-latency mode is restored");
+        QComboBox* source = sourceBox(window);
+        QComboBox* target = targetBox(window);
+        source->setCurrentIndex(0);
+        target->setCurrentIndex(1);
+        expect(invoke(window, "startStopClicked"),
+               "monitoring starts before a live mode switch");
+        expect(router->requests.size() == 1 && router->isRunning()
+                   && router->requests.front().monitoringMode
+                       == MonitoringMode::LowLatency,
+               "initial low-latency session is running");
+        expect(invoke(window, "selectStableMode"),
+               "stable mode slot is invokable while running");
+        expect(router->stopCount == 1 && router->requests.size() == 2
+                   && router->requests.back().monitoringMode
+                       == MonitoringMode::Stable
+                   && router->isRunning(),
+               "live mode switch restarts exactly one session");
+        expect(router->selectedMode == MonitoringMode::Stable,
+               "restarted session uses stable mode");
+        QSettings settings;
+        expect(settings.value(QStringLiteral("audio/monitoringMode")).toString()
+                   == QStringLiteral("stable"),
+               "stable selection is persisted");
+    }
 }
 
 void testLanguagePersistenceAndLocaleDefault()
@@ -478,6 +592,7 @@ int main(int argc, char* argv[])
     testInvalidAndIdenticalSelections();
     testVolumeRange();
     testLanguageSwitchUpdatesWidgetsAndTray();
+    testMonitoringModeSelectionAndPersistence();
     testLanguagePersistenceAndLocaleDefault();
     testDeviceNamesRemainOpaque();
 

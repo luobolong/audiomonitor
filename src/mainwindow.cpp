@@ -45,6 +45,9 @@ constexpr int kMaxReconnectAttempts = int(std::size(kReconnectDelaysMs));
 constexpr auto kLanguageSetting = "ui/language";
 constexpr auto kEnglishLanguage = "en";
 constexpr auto kSimplifiedChineseLanguage = "zh_CN";
+constexpr auto kMonitoringModeSetting = "audio/monitoringMode";
+constexpr auto kLowLatencyMode = "low_latency";
+constexpr auto kStableMode = "stable";
 constexpr int kDeviceNameRole = Qt::UserRole + 1;
 constexpr int kDeviceDefaultRole = Qt::UserRole + 2;
 constexpr int kVolumeMinPercent = 0;
@@ -350,6 +353,10 @@ void MainWindow::buildUi()
     m_trayMenu->addSeparator();
     m_languageMenu = new QMenu(this);
     m_trayMenu->addMenu(m_languageMenu);
+    if (m_router->supportsMonitoringModeSelection()) {
+        m_monitoringModeMenu = new QMenu(this);
+        m_trayMenu->addMenu(m_monitoringModeMenu);
+    }
     m_trayMenu->addSeparator();
     m_trayQuit = new QAction(this);
     m_trayMenu->addAction(m_trayQuit);
@@ -363,6 +370,18 @@ void MainWindow::buildUi()
     m_languageMenu->addAction(m_languageChinese);
     m_languageEnglish->setCheckable(true);
     m_languageChinese->setCheckable(true);
+    if (m_monitoringModeMenu) {
+        m_monitoringModeGroup = new QActionGroup(this);
+        m_monitoringModeGroup->setExclusive(true);
+        m_lowLatencyMode = new QAction(this);
+        m_stableMode = new QAction(this);
+        m_monitoringModeGroup->addAction(m_lowLatencyMode);
+        m_monitoringModeGroup->addAction(m_stableMode);
+        m_monitoringModeMenu->addAction(m_lowLatencyMode);
+        m_monitoringModeMenu->addAction(m_stableMode);
+        m_lowLatencyMode->setCheckable(true);
+        m_stableMode->setCheckable(true);
+    }
     m_tray->setContextMenu(m_trayMenu);
     m_tray->show();
 
@@ -377,6 +396,12 @@ void MainWindow::buildUi()
     connect(m_trayQuit, &QAction::triggered, this, &MainWindow::quitApp);
     connect(m_languageEnglish, &QAction::triggered, this, &MainWindow::selectEnglish);
     connect(m_languageChinese, &QAction::triggered, this, &MainWindow::selectSimplifiedChinese);
+    if (m_lowLatencyMode) {
+        connect(m_lowLatencyMode, &QAction::triggered,
+                this, &MainWindow::selectLowLatencyMode);
+        connect(m_stableMode, &QAction::triggered,
+                this, &MainWindow::selectStableMode);
+    }
 
     retranslateUi();
 }
@@ -454,6 +479,64 @@ void MainWindow::updateLanguageActions()
         m_languageChinese->setChecked(m_languageCode == QLatin1String(kSimplifiedChineseLanguage));
 }
 
+void MainWindow::selectLowLatencyMode()
+{
+    applyMonitoringMode(MonitoringMode::LowLatency, true);
+}
+
+void MainWindow::selectStableMode()
+{
+    applyMonitoringMode(MonitoringMode::Stable, true);
+}
+
+void MainWindow::applyMonitoringMode(MonitoringMode mode, bool persist)
+{
+    if (!m_router || !m_router->supportsMonitoringModeSelection())
+        return;
+    if (mode == m_monitoringMode) {
+        updateMonitoringModeActions();
+        return;
+    }
+
+    const bool restart = m_running;
+    QString sourceId;
+    QString targetId;
+    if (restart) {
+        const SessionDeviceIds ids = m_router->lastSessionDeviceIds();
+        sourceId = ids.sourceId.isEmpty() ? m_source->currentData().toString()
+                                          : ids.sourceId;
+        targetId = ids.targetId.isEmpty() ? m_target->currentData().toString()
+                                          : ids.targetId;
+        cancelReconnect();
+        m_router->stop();
+    }
+
+    m_monitoringMode = mode;
+    m_router->setMonitoringMode(mode);
+    updateMonitoringModeActions();
+    if (persist) {
+        QSettings settings;
+        settings.setValue(QString::fromLatin1(kMonitoringModeSetting),
+                          mode == MonitoringMode::LowLatency
+                              ? QString::fromLatin1(kLowLatencyMode)
+                              : QString::fromLatin1(kStableMode));
+        settings.sync();
+    }
+
+    if (restart && !sourceId.isEmpty() && !targetId.isEmpty()) {
+        const float volume = m_volumeInput->value() / kVolumePercentScale;
+        m_router->start(sourceId, targetId, volume);
+    }
+}
+
+void MainWindow::updateMonitoringModeActions()
+{
+    if (m_lowLatencyMode)
+        m_lowLatencyMode->setChecked(m_monitoringMode == MonitoringMode::LowLatency);
+    if (m_stableMode)
+        m_stableMode->setChecked(m_monitoringMode == MonitoringMode::Stable);
+}
+
 void MainWindow::retranslateUi()
 {
     setWindowTitle(QStringLiteral("Audio Monitor"));
@@ -483,7 +566,14 @@ void MainWindow::retranslateUi()
         m_languageEnglish->setText(tr("English"));
     if (m_languageChinese)
         m_languageChinese->setText(tr("Simplified Chinese"));
+    if (m_monitoringModeMenu)
+        m_monitoringModeMenu->setTitle(tr("Monitoring mode"));
+    if (m_lowLatencyMode)
+        m_lowLatencyMode->setText(tr("Low latency"));
+    if (m_stableMode)
+        m_stableMode->setText(tr("Stable"));
     updateLanguageActions();
+    updateMonitoringModeActions();
 
     const QString defaultSuffix = tr(" (default)");
     const auto updateLabels = [&defaultSuffix](QComboBox* box) {
@@ -856,6 +946,14 @@ void MainWindow::closeEvent(QCloseEvent* event)
 void MainWindow::loadSettings()
 {
     QSettings s;
+    const QString mode = s.value(QString::fromLatin1(kMonitoringModeSetting),
+                                 QString::fromLatin1(kStableMode)).toString();
+    m_monitoringMode = mode == QLatin1String(kLowLatencyMode)
+        ? MonitoringMode::LowLatency
+        : MonitoringMode::Stable;
+    if (m_router && m_router->supportsMonitoringModeSelection())
+        m_router->setMonitoringMode(m_monitoringMode);
+    updateMonitoringModeActions();
     m_volumeInput->setValue(s.value(QStringLiteral("volume"), kVolumeDefaultPercent).toInt());
     m_savedSourceId = s.value(QStringLiteral("source/id")).toString();
     m_savedSourceName = s.value(QStringLiteral("source/name")).toString();
@@ -866,6 +964,10 @@ void MainWindow::loadSettings()
 void MainWindow::saveSettings()
 {
     QSettings s;
+    s.setValue(QString::fromLatin1(kMonitoringModeSetting),
+               m_monitoringMode == MonitoringMode::LowLatency
+                   ? QString::fromLatin1(kLowLatencyMode)
+                   : QString::fromLatin1(kStableMode));
     s.setValue(QStringLiteral("volume"), m_volumeInput->value());
     const auto currentDeviceName = [](QComboBox* box) {
         const int index = box ? box->currentIndex() : -1;

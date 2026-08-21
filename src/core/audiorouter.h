@@ -29,6 +29,16 @@ enum class StopReason {
 };
 Q_DECLARE_METATYPE(StopReason)
 
+// Windows queue policy. LowLatency reads each render request directly from
+// the SPSC queue, matching the original implementation. Stable keeps a short
+// adaptive queue level to absorb scheduling jitter and independent-device
+// clock drift. Backends without an application PCM queue may ignore it.
+enum class MonitoringMode {
+    LowLatency,
+    Stable
+};
+Q_DECLARE_METATYPE(MonitoringMode)
+
 // Abstract audio monitoring and forwarding engine.
 //
 // The source is an output device whose currently playing audio is captured
@@ -62,6 +72,13 @@ public:
 
     // Change the volume while running, in the range 0.0 to 5.0.
     virtual void setVolume(float volume) = 0;
+
+    // Only backends that can provide both policies expose the tray selector.
+    virtual bool supportsMonitoringModeSelection() const { return false; }
+    virtual MonitoringMode monitoringMode() const { return MonitoringMode::Stable; }
+    // The selected policy applies to the next start(). The caller stops and
+    // restarts an active session when an immediate change is required.
+    virtual void setMonitoringMode(MonitoringMode mode) { Q_UNUSED(mode); }
 
     // Debug dumps are optional backend capabilities. Unsupported backends
     // reject them through errorOccurred(). Capture output is interleaved

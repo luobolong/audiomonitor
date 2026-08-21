@@ -26,6 +26,9 @@ public:
     bool isRunning() const override;
     SessionDeviceIds lastSessionDeviceIds() const override;
     void setVolume(float volume) override;
+    bool supportsMonitoringModeSelection() const override { return true; }
+    MonitoringMode monitoringMode() const override { return m_monitoringMode; }
+    void setMonitoringMode(MonitoringMode mode) override;
 
     // Internal entry points used by worker threads and notification callbacks.
     // They must not be called by application code.
@@ -41,4 +44,5 @@ private:
     NotificationClient* m_notifier = nullptr;
     IMMDeviceEnumerator* m_notificationEnumerator = nullptr;
     bool m_notifierRegistered = false;
+    MonitoringMode m_monitoringMode = MonitoringMode::Stable;
 };

@@ -347,10 +347,12 @@ WAVEFORMATEXTENSIBLE makeFloat32Format(DWORD sampleRate, UINT32 channels)
 // ---------------------------------------------------------------------------
 class WinSession : public std::enable_shared_from_this<WinSession> {
 public:
-    WinSession(QPointer<AudioRouterWin> owner, QString sourceId, QString targetId, float volume)
+    WinSession(QPointer<AudioRouterWin> owner, QString sourceId, QString targetId, float volume,
+               MonitoringMode monitoringMode)
         : m_owner(owner),
           m_sourceId(std::move(sourceId)),
           m_targetId(std::move(targetId)),
+          m_monitoringMode(monitoringMode),
           m_volumeBits(encodeFloat(std::clamp(volume, 0.0f, kMaxVolume))),
           m_stop(false),
           m_running(false),
@@ -851,37 +853,40 @@ private:
                 "AudioRouterWin", "Unable to obtain the render client (%1)"))
                             .arg(hresultText(hr)));
 
-        // Keep a short safety margin between the independent source and
-        // target clocks. The target accounts for the largest render request,
-        // while retaining queue headroom for scheduling jitter. Outside the
-        // hysteresis window the reader corrects drift by at most one frame
-        // per callback instead of waiting for a destructive overflow flush.
-        const size_t queueCapacity = m_ring->capacity();
-        const size_t hysteresisFrames = std::max<size_t>(
-            1, framesForDuration(m_captureSampleRate,
-                                 kQueueHysteresisDurationMs));
-        const size_t headroomFrames = std::max(
-            hysteresisFrames,
-            framesForDuration(m_captureSampleRate, kQueueSafetyDurationMs / 2));
-        const size_t maxTargetFrames = queueCapacity > headroomFrames
-            ? queueCapacity - headroomFrames
-            : queueCapacity;
-        const size_t minimumForRender = std::min<size_t>(bufferFrames, queueCapacity);
-        const size_t desiredTargetFrames = std::max(
-            framesForDuration(m_captureSampleRate, kQueueTargetDurationMs),
-            static_cast<size_t>(bufferFrames)
-                + framesForDuration(m_captureSampleRate,
-                                    kQueueSafetyDurationMs));
-        const size_t targetFrames = std::max(
-            minimumForRender,
-            std::min(desiredTargetFrames, maxTargetFrames));
-        try {
-            queueReader = std::make_unique<AdaptiveAudioBufferReader>(
-                *m_ring, bufferFrames, targetFrames, hysteresisFrames);
-        } catch (const std::exception& ex) {
-            return fail(winTr(QT_TRANSLATE_NOOP(
-                "AudioRouterWin", "Unable to create the adaptive audio reader: %1"))
-                            .arg(QString::fromLocal8Bit(ex.what())));
+        if (m_monitoringMode == MonitoringMode::Stable) {
+            // Keep a short safety margin between the independent source and
+            // target clocks. The target accounts for the largest render
+            // request while retaining queue headroom for scheduling jitter.
+            // Outside the hysteresis window the reader corrects drift by at
+            // most one frame per callback.
+            const size_t queueCapacity = m_ring->capacity();
+            const size_t hysteresisFrames = std::max<size_t>(
+                1, framesForDuration(m_captureSampleRate,
+                                     kQueueHysteresisDurationMs));
+            const size_t headroomFrames = std::max(
+                hysteresisFrames,
+                framesForDuration(m_captureSampleRate,
+                                  kQueueSafetyDurationMs / 2));
+            const size_t maxTargetFrames = queueCapacity > headroomFrames
+                ? queueCapacity - headroomFrames
+                : queueCapacity;
+            const size_t minimumForRender = std::min<size_t>(bufferFrames, queueCapacity);
+            const size_t desiredTargetFrames = std::max(
+                framesForDuration(m_captureSampleRate, kQueueTargetDurationMs),
+                static_cast<size_t>(bufferFrames)
+                    + framesForDuration(m_captureSampleRate,
+                                        kQueueSafetyDurationMs));
+            const size_t targetFrames = std::max(
+                minimumForRender,
+                std::min(desiredTargetFrames, maxTargetFrames));
+            try {
+                queueReader = std::make_unique<AdaptiveAudioBufferReader>(
+                    *m_ring, bufferFrames, targetFrames, hysteresisFrames);
+            } catch (const std::exception& ex) {
+                return fail(winTr(QT_TRANSLATE_NOOP(
+                    "AudioRouterWin", "Unable to create the adaptive audio reader: %1"))
+                                .arg(QString::fromLocal8Bit(ex.what())));
+            }
         }
 
         hr = client->Start();
@@ -941,10 +946,12 @@ private:
                     break;
                 }
 
-                const size_t consumedFrames = queueReader->render(
-                    *m_ring,
-                    reinterpret_cast<float*>(data), avail,
-                    decodeFloat(m_volumeBits.load(std::memory_order_relaxed)));
+                const float volume =
+                    decodeFloat(m_volumeBits.load(std::memory_order_relaxed));
+                const size_t consumedFrames = queueReader
+                    ? queueReader->render(*m_ring, reinterpret_cast<float*>(data),
+                                          avail, volume)
+                    : m_ring->read(reinterpret_cast<float*>(data), avail, volume);
                 const DWORD releaseFlags = consumedFrames == 0
                     ? AUDCLNT_BUFFERFLAGS_SILENT : 0;
                 if (FAILED(ren->ReleaseBuffer(avail, releaseFlags))) {
@@ -966,6 +973,7 @@ private:
     QPointer<AudioRouterWin> m_owner;
     QString m_sourceId;
     QString m_targetId;
+    const MonitoringMode m_monitoringMode;
     // Published by capReady before render thread creation. Destroyed only after
     // both producer and consumer threads have joined.
     std::unique_ptr<RingBuffer> m_ring;
@@ -1204,7 +1212,8 @@ bool AudioRouterWin::start(const QString& sourceId, const QString& targetId, flo
         return false;
     }
     stop();
-    auto session = std::make_shared<WinSession>(this, sourceId, targetId, volume);
+    auto session = std::make_shared<WinSession>(
+        this, sourceId, targetId, volume, m_monitoringMode);
     QString err;
     if (!session->launch(&err)) {
         emit errorOccurred(err);
@@ -1258,6 +1267,11 @@ void AudioRouterWin::setVolume(float volume)
 {
     if (m_session)
         m_session->setVolume(volume);
+}
+
+void AudioRouterWin::setMonitoringMode(MonitoringMode mode)
+{
+    m_monitoringMode = mode;
 }
 
 void AudioRouterWin::notifyThreadError(WinSession* session, const QString& message)

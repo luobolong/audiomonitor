@@ -30,7 +30,7 @@ Typical uses include:
 
 | Platform | Monitoring source | Real-time path |
 | --- | --- | --- |
-| Windows | WASAPI loopback capture | Capture thread → strict SPSC RingBuffer → adaptive reader → shared-mode WASAPI render thread |
+| Windows | WASAPI loopback capture | Capture thread → strict SPSC RingBuffer → direct/adaptive reader → shared-mode WASAPI render thread |
 | Linux | PipeWire sink monitor output | Monitor ports → native `pw_filter` → target sink |
 
 ### Windows: WASAPI and independent device clocks
@@ -42,7 +42,7 @@ Source output device
     → WASAPI loopback capture
     → format conversion and stereo downmix
     → bounded SPSC RingBuffer
-    → queue-level and clock-drift control
+    → direct reading or queue-level and clock-drift control
     → shared-mode WASAPI rendering
     → target output device
 ```
@@ -59,7 +59,12 @@ Key properties:
 
 The source and target endpoints normally use independent hardware clocks. Even if both are nominally 48 kHz, their real rates differ slightly. A fixed RingBuffer can only postpone an underrun or overrun; it cannot remove long-term drift.
 
-The render side therefore maintains a short target queue level:
+The Windows tray menu provides two mutually exclusive monitoring modes. The selection is persisted, and changing it while monitoring automatically restarts the current audio path:
+
+- **Low latency** uses the original direct-read implementation. It reads every WASAPI request directly from the RingBuffer without first building a target queue level. It normally has lower queueing latency but is more exposed to scheduling jitter, brief underruns, and long-term clock drift;
+- **Stable** uses the current adaptive implementation and is the default. It maintains a short target level, trading some latency for more reliable monitoring between independent devices.
+
+In stable mode, the render side:
 
 - A base target of about 20 ms is adjusted for the WASAPI render buffer and safety headroom;
 - About 2 ms of hysteresis prevents constant corrections near the target;
@@ -69,7 +74,7 @@ The render side therefore maintains a short target queue level:
 - Startup and underrun recovery rebuild the safety margin before audio resumes;
 - Volume changes ramp over one output block to reduce clicks.
 
-The physical queue capacity is 50 ms, but that is not a fixed monitoring delay. The current queue level, WASAPI buffers, device drivers, and hardware all contribute to real end-to-end latency.
+The physical queue capacity is 50 ms, but that is not a fixed monitoring delay. Low-latency mode does not deliberately maintain a queue level; stable mode has a base target of about 20 ms. Actual queue occupancy, WASAPI buffers, device drivers, and hardware all contribute to end-to-end latency.
 
 When capture reports a discontinuity or the queue overruns, the producer publishes a discontinuity generation. The consumer then drops queued audio from before the interruption and re-buffers instead of replaying stale sound.
 
@@ -121,8 +126,9 @@ The generic Linux package and AppImage still require a running PipeWire service 
 1. Select the output device currently playing audio as the monitoring source;
 2. Select a different output device as the forwarding target;
 3. Set the monitoring volume;
-4. Click **Start monitoring**;
-5. Closing the window keeps the application running when the desktop provides a system tray.
+4. On Windows, choose **Low latency** or **Stable** from **Monitoring mode** in the tray menu;
+5. Click **Start monitoring**;
+6. Closing the window keeps the application running when the desktop provides a system tray.
 
 If a device is removed or the audio service becomes temporarily unavailable, the active session stops. The UI keeps the endpoint IDs actually used by that session and attempts to reconnect when both devices are available again.
 
@@ -267,6 +273,8 @@ Windows end-to-end latency can include:
 - the current application queue level;
 - target WASAPI padding and stream latency;
 - target driver and hardware buffers.
+
+Choose **Low latency** when the lowest nominal latency is the only priority. Keep the default **Stable** mode when continuity across different devices matters more. These names describe buffering policies; they are not measured-latency guarantees for every device.
 
 Linux end-to-end latency can include:
 
